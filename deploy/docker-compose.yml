@@ -1,0 +1,75 @@
+name: boors-azma-platform
+
+services:
+  boors-azma-db:
+    image: postgres:alpine3.23
+    container_name: boors-azma-db
+    environment:
+      POSTGRES_DB: boors
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: 12345
+    volumes:
+      - boors-azma-db-data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres -d boors"]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+    restart: unless-stopped
+
+  tsetmc-api:
+    build:
+      context: ../../tsetmc-api
+    container_name: tsetmc-api
+    ports:
+      - "9000:9000"
+    restart: unless-stopped
+
+  fipiran-api:
+    build:
+      context: ../../fipiran-api
+    container_name: fipiran-api
+    ports:
+      - "9001:9001"
+    restart: unless-stopped
+
+  codal-api:
+    build:
+      context: ../../codal-api
+    container_name: codal-api
+    ports:
+      - "9002:9002"
+    restart: unless-stopped
+
+  boors-azma-api:
+    build:
+      context: ../../boors-azma-api
+    container_name: boors-azma-api
+    ports:
+      - "9003:9003"
+    environment:
+      SERVER_PORT: 9003
+      SPRING_DATASOURCE_URL: jdbc:postgresql://boors-azma-db:5432/boors
+      SPRING_DATASOURCE_USERNAME: postgres
+      SPRING_DATASOURCE_PASSWORD: 12345
+      APP_SECURITY_JWT_SECRET: boors-azma-jwt-secret-key-with-at-least-32-bytes
+    depends_on:
+      boors-azma-db:
+        condition: service_healthy
+    restart: unless-stopped
+
+  boors-azma-ui:
+    build:
+      context: ../../boors-azma-ui
+    container_name: boors-azma-ui
+    ports:
+      - "8080:8080"
+    depends_on:
+      - tsetmc-api
+      - fipiran-api
+      - codal-api
+      - boors-azma-api
+    restart: unless-stopped
+
+volumes:
+  boors-azma-db-data:
