@@ -2,6 +2,7 @@ name: boors-azma-platform
 
 services:
   tsetmc-api:
+    image: tsetmc-api
     build:
       context: ../../tsetmc-api
     container_name: tsetmc-api
@@ -10,6 +11,7 @@ services:
     restart: unless-stopped
 
   fipiran-api:
+    image: fipiran-api
     build:
       context: ../../fipiran-api
     container_name: fipiran-api
@@ -18,6 +20,7 @@ services:
     restart: unless-stopped
 
   codal-api:
+    image: codal-api
     build:
       context: ../../codal-api
     container_name: codal-api
@@ -26,6 +29,7 @@ services:
     restart: unless-stopped
 
   boors-azma-ui:
+    image: boors-azma-ui
     build:
       context: ../../boors-azma-ui
     container_name: boors-azma-ui
