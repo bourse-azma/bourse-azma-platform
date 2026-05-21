@@ -2,7 +2,7 @@ name: boors-azma-platform
 
 services:
   boors-azma-db:
-    image: postgres:alpine3.23
+    image: postgres:14.22-alpine
     container_name: boors-azma-db
     environment:
       POSTGRES_DB: boors
