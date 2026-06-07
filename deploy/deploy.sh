@@ -135,9 +135,10 @@ print_menu() {
 ${C_BOLD}${C_CYAN}===== Platform Deploy Menu =====${C_RESET}
 1) Start services
 2) Stop services
-3) See status
-4) See logs
-5) Exit
+3) Restart services
+4) See status
+5) See logs
+6) Exit
 MENU
 }
 
@@ -173,6 +174,14 @@ stop_services() {
   run_compose_action down
 }
 
+restart_services() {
+  info "Restarting services (down, then up)..."
+  if ! run_compose_action down; then
+    return 1
+  fi
+  run_compose_action up --build -d
+}
+
 show_status() {
   title "Service status:"
   run_compose_action ps
@@ -193,7 +202,7 @@ show_logs() {
 
 while true; do
   print_menu
-  if ! read -r -p "Choose an option [1-5]: " choice; then
+  if ! read -r -p "Choose an option [1-6]: " choice; then
     echo
     info "Exiting."
     exit 0
@@ -207,17 +216,20 @@ while true; do
       run_menu_action stop_services
       ;;
     3)
-      run_menu_action show_status
+      run_menu_action restart_services
       ;;
     4)
-      run_menu_action show_logs
+      run_menu_action show_status
       ;;
     5)
+      run_menu_action show_logs
+      ;;
+    6)
       info "Exiting."
       exit 0
       ;;
     *)
-      warn "Invalid option. Please choose 1, 2, 3, 4, or 5."
+      warn "Invalid option. Please choose 1, 2, 3, 4, 5, or 6."
       ;;
   esac
 done
