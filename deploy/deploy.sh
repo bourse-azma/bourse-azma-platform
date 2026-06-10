@@ -70,6 +70,95 @@ count_running_services() {
   echo "${count:-0}"
 }
 
+list_defined_services() {
+  compose_cmd config --services 2>/dev/null
+}
+
+print_services_menu() {
+  local title_text="$1"
+  local include_all="${2:-1}"
+  local services service index=1
+
+  services="$(list_defined_services)"
+  if [[ -z "$services" ]]; then
+    warn "No services defined in compose file."
+    return 1
+  fi
+
+  echo
+  title "$title_text"
+  if [[ "$include_all" == "1" ]]; then
+    echo "0) All services"
+  fi
+  while IFS= read -r service; do
+    [[ -n "$service" ]] || continue
+    printf '%s) %s\n' "$index" "$service"
+    index=$((index + 1))
+  done <<< "$services"
+  echo
+  if [[ "$include_all" == "1" ]]; then
+    echo "Enter numbers like 0, 1, 1,3 or 1,2,3"
+  else
+    echo "Enter one service number like 1 or 2"
+  fi
+}
+
+normalize_service_selection() {
+  local input="$1"
+  printf '%s' "$input" | tr -d '[:space:]'
+}
+
+build_selected_services() {
+  local selection="$1"
+  local services service selected=()
+
+  services="$(list_defined_services)"
+  while IFS= read -r service; do
+    [[ -n "$service" ]] || continue
+    selected+=("$service")
+  done <<< "$services"
+
+  if [[ "$selection" == "0" ]]; then
+    printf '%s\n' "${selected[@]}"
+    return 0
+  fi
+
+  local IFS=','
+  read -r -a parts <<< "$selection"
+
+  local part
+  for part in "${parts[@]}"; do
+    if [[ ! "$part" =~ ^[0-9]+$ ]]; then
+      return 1
+    fi
+    if [[ "$part" -lt 1 || "$part" -gt "${#selected[@]}" ]]; then
+      return 1
+    fi
+    printf '%s\n' "${selected[$((part - 1))]}"
+  done
+}
+
+build_single_selected_service() {
+  local selection="$1"
+  local services service selected=()
+
+  services="$(list_defined_services)"
+  while IFS= read -r service; do
+    [[ -n "$service" ]] || continue
+    selected+=("$service")
+  done <<< "$services"
+
+  if [[ ! "$selection" =~ ^[0-9]+$ ]]; then
+    return 1
+  fi
+
+  if [[ "$selection" -lt 1 || "$selection" -gt "${#selected[@]}" ]]; then
+    return 1
+  fi
+
+  printf '%s\n' "${selected[$((selection - 1))]}"
+}
+
 run_compose_action() {
   if ! docker_ready; then
     return 1
@@ -175,11 +264,44 @@ stop_services() {
 }
 
 restart_services() {
-  info "Restarting services (down, then up)..."
-  if ! run_compose_action down; then
+  local choice normalized selected_services=()
+
+  if ! docker_ready; then
     return 1
   fi
-  run_compose_action up --build -d
+
+  if ! print_services_menu "Select services to restart:"; then
+    return 1
+  fi
+
+  read -r -p "Choose services to restart [0]: " choice || return 1
+  normalized="$(normalize_service_selection "${choice:-0}")"
+  [[ -n "$normalized" ]] || normalized="0"
+
+  local selected_output
+  selected_output="$(build_selected_services "$normalized")"
+  if [[ $? -ne 0 ]]; then
+    err "Invalid selection. Use 0 for all services or a comma-separated list like 1,3."
+    return 1
+  fi
+
+  while IFS= read -r service; do
+    [[ -n "$service" ]] || continue
+    selected_services+=("$service")
+  done <<< "$selected_output"
+
+  if [[ "${#selected_services[@]}" -eq 0 ]]; then
+    err "No valid services selected."
+    return 1
+  fi
+
+  if [[ "$normalized" == "0" ]]; then
+    info "Restarting all services..."
+  else
+    info "Restarting selected services: ${selected_services[*]}"
+  fi
+
+  run_compose_action up --build -d "${selected_services[@]}"
 }
 
 show_status() {
@@ -188,7 +310,7 @@ show_status() {
 }
 
 show_logs() {
-  local running
+  local running choice normalized selected_service
   running="$(count_running_services)"
 
   if [[ "$running" -eq 0 ]]; then
@@ -196,8 +318,33 @@ show_logs() {
     return 0
   fi
 
-  info "Showing logs (last 200 lines, follow mode). Press Ctrl+C to return to menu."
-  run_compose_action logs --tail 200 -f
+  if ! docker_ready; then
+    return 1
+  fi
+
+  if ! print_services_menu "Select service to view logs:" 0; then
+    return 1
+  fi
+
+  read -r -p "Choose service to view logs: " choice || return 1
+  normalized="$(normalize_service_selection "$choice")"
+
+  selected_service="$(build_single_selected_service "$normalized")"
+  if [[ $? -ne 0 ]]; then
+    err "Invalid selection. Choose one service number."
+    return 1
+  fi
+
+  info "Showing logs for $selected_service (last 200 lines, follow mode). Press Ctrl+C to return to menu."
+
+  compose_cmd logs --tail 200 -f "$selected_service"
+  local status=$?
+  if [[ $status -eq 0 || $status -eq 130 ]]; then
+    return 0
+  fi
+
+  err "Action failed: docker compose logs --tail 200 -f $selected_service"
+  return 1
 }
 
 while true; do

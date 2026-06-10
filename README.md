@@ -3,6 +3,7 @@
 Central platform workspace for cross-project assets in the Boors Azma ecosystem.
 
 This directory is intended to host:
+
 - deployment scripts and runtime manifests
 - shared documentation
 - common code/assets used by multiple services (for example shared Java modules in the future)
@@ -18,13 +19,13 @@ This directory is intended to host:
 File: `deploy/docker-compose.yml`
 
 Included services:
+
 - `boors-azma-db` (PostgreSQL)
 - `tsetmc-api` on `9000:9000`
 - `fipiran-api` on `9001:9001`
 - `codal-api` on `9002:9002`
 - `boors-azma-api` on `9003:9003`
 - `boors-azma-ui` on `8080:8080`
-
 
 ## Usage
 
@@ -54,6 +55,7 @@ APP_SECURITY_JWT_SECRET=Qp7mN2vL9xRt4Ks8wZc1Ha6uJd3Fy0BnEe5Tg4Ui7Yo2
 ## UI Env File (for Docker Compose)
 
 Create this file:
+
 - `boors-azma-ui/.env`
 
 Use these values (matched to the `deploy/docker-compose.yml` stack):
