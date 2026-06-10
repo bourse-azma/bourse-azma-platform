@@ -3,6 +3,14 @@ set -uo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 COMPOSE_FILE="${COMPOSE_FILE:-$SCRIPT_DIR/docker-compose.yml}"
+SERVICE_ORDER=(
+  tsetmc-api
+  boors-azma-db
+  boors-azma-api
+  codal-api
+  fipiran-api
+  boors-azma-ui
+)
 
 if [[ -t 1 ]]; then
   C_RESET="$(printf '\033[0m')"
@@ -71,7 +79,33 @@ count_running_services() {
 }
 
 list_defined_services() {
-  compose_cmd config --services 2>/dev/null
+  local compose_services ordered=() service known
+
+  compose_services="$(compose_cmd config --services 2>/dev/null)"
+
+  for service in "${SERVICE_ORDER[@]}"; do
+    if grep -Fxq "$service" <<< "$compose_services"; then
+      ordered+=("$service")
+    fi
+  done
+
+  while IFS= read -r service; do
+    [[ -n "$service" ]] || continue
+
+    local is_known=0
+    for known in "${SERVICE_ORDER[@]}"; do
+      if [[ "$service" == "$known" ]]; then
+        is_known=1
+        break
+      fi
+    done
+
+    if [[ "$is_known" -eq 0 ]]; then
+      ordered+=("$service")
+    fi
+  done <<< "$compose_services"
+
+  printf '%s\n' "${ordered[@]}"
 }
 
 print_services_menu() {
