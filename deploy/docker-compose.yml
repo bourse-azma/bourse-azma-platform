@@ -59,6 +59,7 @@ services:
       SPRING_DATASOURCE_PASSWORD: 12345
       APP_SECURITY_JWT_SECRET: boors-azma-jwt-secret-key-with-at-least-32-bytes
       APP_MARKET_SEARCH_CSV_PATH: /app/market.csv
+      APP_TSETMC_API_BASE_URL: http://tsetmc-api:9000/tsetmc/api/v1
     depends_on:
       boors-azma-db:
         condition: service_healthy
