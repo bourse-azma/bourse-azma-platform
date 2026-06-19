@@ -49,6 +49,8 @@ services:
     container_name: codal-api
     ports:
       - "9002:9002"
+    env_file:
+      - ../../boors-azma-ui/.env
     environment:
       SPRING_DATA_REDIS_HOST: redis
     depends_on:
