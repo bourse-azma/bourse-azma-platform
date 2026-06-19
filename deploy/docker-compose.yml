@@ -24,6 +24,12 @@ services:
     container_name: tsetmc-api
     ports:
       - "9000:9000"
+    env_file:
+      - ../../boors-azma-ui/.env
+    environment:
+      SPRING_DATA_REDIS_HOST: redis
+    depends_on:
+      - redis
     restart: unless-stopped
 
   fipiran-api:
