@@ -1,4 +1,4 @@
-# boors-azma-platform
+# bourse-azma-platform
 
 Central platform workspace for cross-project assets in the Boors Azma ecosystem.
 
@@ -20,17 +20,17 @@ File: `deploy/docker-compose.yml`
 
 Included services:
 
-- `boors-azma-db` (PostgreSQL)
+- `bourse-azma-db` (PostgreSQL)
 - `tsetmc-api` on `9000:9000`
 - `fipiran-api` on `9001:9001`
 - `codal-api` on `9002:9002`
-- `boors-azma-api` on `9003:9003`
-- `boors-azma-ui` on `8080:8080`
+- `bourse-azma-api` on `9003:9003`
+- `bourse-azma-ui` on `8080:8080`
 
 ## Usage
 
 ```bash
-cd boors-azma-platform/deploy
+cd bourse-azma-platform/deploy
 docker compose up --build -d
 ```
 
@@ -56,7 +56,7 @@ APP_SECURITY_JWT_SECRET=Qp7mN2vL9xRt4Ks8wZc1Ha6uJd3Fy0BnEe5Tg4Ui7Yo2
 
 Create this file:
 
-- `boors-azma-ui/.env`
+- `bourse-azma-ui/.env`
 
 Use these values (matched to the `deploy/docker-compose.yml` stack):
 

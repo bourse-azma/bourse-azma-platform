@@ -6,11 +6,11 @@ WORKSPACE_DIR="$(cd "$SCRIPT_DIR/../.." && pwd)"
 
 REPOS=(
   tsetmc-api
-  boors-azma-api
+  bourse-azma-api
   codal-api
   fipiran-api
-  boors-azma-ui
-  boors-azma-platform
+  bourse-azma-ui
+  bourse-azma-platform
 )
 
 if [[ -t 1 ]]; then
@@ -38,7 +38,7 @@ FAILED=0
 FAILED_REPOS=()
 
 echo
-title "===== boors-azma update ====="
+title "===== bourse-azma update ====="
 info "Workspace: $WORKSPACE_DIR"
 echo
 

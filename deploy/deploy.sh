@@ -5,11 +5,11 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 COMPOSE_FILE="${COMPOSE_FILE:-$SCRIPT_DIR/docker-compose.yml}"
 SERVICE_ORDER=(
   tsetmc-api
-  boors-azma-db
-  boors-azma-api
+  bourse-azma-db
+  bourse-azma-api
   codal-api
   fipiran-api
-  boors-azma-ui
+  bourse-azma-ui
 )
 
 if [[ -t 1 ]]; then

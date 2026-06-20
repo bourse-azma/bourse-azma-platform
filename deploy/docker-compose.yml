@@ -1,17 +1,17 @@
-name: boors-azma-platform
+name: bourse-azma-platform
 
 services:
-  boors-azma-db:
+  bourse-azma-db:
     image: postgres:14.22-alpine
-    container_name: boors-azma-db
+    container_name: bourse-azma-db
     environment:
-      POSTGRES_DB: boors
+      POSTGRES_DB: bourse
       POSTGRES_USER: postgres
       POSTGRES_PASSWORD: 12345
     volumes:
-      - boors-azma-db-data:/var/lib/postgresql/data
+      - bourse-azma-db-data:/var/lib/postgresql/data
     healthcheck:
-      test: [ "CMD-SHELL", "pg_isready -U postgres -d boors" ]
+      test: [ "CMD-SHELL", "pg_isready -U postgres -d bourse" ]
       interval: 5s
       timeout: 3s
       retries: 20
@@ -25,7 +25,7 @@ services:
     ports:
       - "9000:9000"
     env_file:
-      - ../../boors-azma-ui/.env
+      - ../../bourse-azma-ui/.env
     environment:
       SPRING_DATA_REDIS_HOST: redis
     depends_on:
@@ -43,7 +43,7 @@ services:
 
   redis:
     image: redis:7-alpine
-    container_name: boors-azma-redis
+    container_name: bourse-azma-redis
     ports:
       - "6379:6379"
     restart: unless-stopped
@@ -56,35 +56,35 @@ services:
     ports:
       - "9002:9002"
     env_file:
-      - ../../boors-azma-ui/.env
+      - ../../bourse-azma-ui/.env
     environment:
       SPRING_DATA_REDIS_HOST: redis
     depends_on:
       - redis
     restart: unless-stopped
 
-  boors-azma-api:
-    image: boors-azma-api
+  bourse-azma-api:
+    image: bourse-azma-api
     build:
       context: ../../
-      dockerfile: boors-azma-api/Dockerfile
-    container_name: boors-azma-api
+      dockerfile: bourse-azma-api/Dockerfile
+    container_name: bourse-azma-api
     ports:
       - "9003:9003"
     environment:
       SERVER_PORT: 9003
-      SPRING_DATASOURCE_URL: jdbc:postgresql://boors-azma-db:5432/boors
+      SPRING_DATASOURCE_URL: jdbc:postgresql://bourse-azma-db:5432/bourse
       SPRING_DATASOURCE_USERNAME: postgres
       SPRING_DATASOURCE_PASSWORD: 12345
       SPRING_DATA_REDIS_HOST: redis
       SPRING_DATA_REDIS_PORT: 6379
-      APP_SECURITY_JWT_SECRET: boors-azma-jwt-secret-key-with-at-least-32-bytes
+      APP_SECURITY_JWT_SECRET: bourse-azma-jwt-secret-key-with-at-least-32-bytes
       APP_MARKET_SEARCH_CSV_PATH: /app/market.csv
       APP_TSETMC_BASE_URL: http://tsetmc-api:9000/tsetmc
       APP_ORDER_MATCHING_ENABLED: "true"
       APP_ORDER_MATCHING_POLL_INTERVAL_MS: 5000
     depends_on:
-      boors-azma-db:
+      bourse-azma-db:
         condition: service_healthy
       redis:
         condition: service_started
@@ -92,19 +92,19 @@ services:
         condition: service_started
     restart: unless-stopped
 
-  boors-azma-ui:
-    image: boors-azma-ui
+  bourse-azma-ui:
+    image: bourse-azma-ui
     build:
-      context: ../../boors-azma-ui
-    container_name: boors-azma-ui
+      context: ../../bourse-azma-ui
+    container_name: bourse-azma-ui
     ports:
       - "8080:8080"
     depends_on:
       - tsetmc-api
       - fipiran-api
       - codal-api
-      - boors-azma-api
+      - bourse-azma-api
     restart: unless-stopped
 
 volumes:
-  boors-azma-db-data:
+  bourse-azma-db-data:
