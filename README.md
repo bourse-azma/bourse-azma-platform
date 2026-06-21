@@ -27,7 +27,27 @@ Included services:
 - `bourse-azma-api` on `9003:9003`
 - `bourse-azma-ui` on `8080:8080`
 
-## Usage
+## Platform Script
+
+Main entry point: `platform.sh` — start/stop services, view logs, and update all workspace repos via git.
+
+```bash
+cd bourse-azma-platform
+
+# Interactive menu
+./platform.sh
+
+# CLI commands
+./platform.sh start
+./platform.sh stop
+./platform.sh restart
+./platform.sh update
+./platform.sh status
+./platform.sh logs --service tsetmc-api --follow
+./platform.sh deploy          # update + restart (CLI shortcut)
+```
+
+## Manual Compose Usage
 
 ```bash
 cd bourse-azma-platform/deploy
