@@ -47,6 +47,20 @@ warn()  { echo "${C_YELLOW}[WARN]${C_RESET}  $*"; }
 err()   { echo "${C_RED}[ERROR]${C_RESET} $*"; }
 title() { echo "${C_BOLD}${C_CYAN}$*${C_RESET}"; }
 
+# Remove macOS AppleDouble metadata files (._*) from the workspace.
+# Portable on macOS (BSD find) and Linux (GNU find): only standard find + rm.
+cleanup_workspace_appledouble() {
+  [[ -d "$WORKSPACE_DIR" ]] || return 0
+
+  local count
+  count="$(find "$WORKSPACE_DIR" -name '._*' -type f 2>/dev/null | wc -l | tr -d '[:space:]')"
+  [[ "$count" -eq 0 ]] && return 0
+
+  info "Removing $count AppleDouble file(s) (._*) from workspace..."
+  find "$WORKSPACE_DIR" -name '._*' -type f -exec rm -f {} + 2>/dev/null
+  ok "Workspace cleanup complete."
+}
+
 usage() {
   cat <<EOF
 Usage: $(basename "$0") [command] [options]

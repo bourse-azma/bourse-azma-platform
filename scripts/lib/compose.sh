@@ -92,6 +92,8 @@ run_compose_action() {
 }
 
 platform_start() {
+  cleanup_workspace_appledouble
+
   local build_flag=(--build)
   [[ "${NO_BUILD:-0}" == "1" ]] && build_flag=()
 
@@ -131,6 +133,8 @@ platform_stop() {
 }
 
 platform_restart() {
+  cleanup_workspace_appledouble
+
   local build_flag=(--build)
   [[ "${NO_BUILD:-0}" == "1" ]] && build_flag=()
 
