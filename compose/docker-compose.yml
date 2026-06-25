@@ -32,15 +32,6 @@ services:
       - redis
     restart: unless-stopped
 
-  fipiran-api:
-    image: fipiran-api
-    build:
-      context: ../../fipiran-api
-    container_name: fipiran-api
-    ports:
-      - "9001:9001"
-    restart: unless-stopped
-
   redis:
     image: redis:7-alpine
     container_name: bourse-azma-redis
@@ -101,7 +92,6 @@ services:
       - "8080:8080"
     depends_on:
       - tsetmc-api
-      - fipiran-api
       - codal-api
       - bourse-azma-api
     restart: unless-stopped

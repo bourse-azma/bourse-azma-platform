@@ -2,7 +2,7 @@
 
 : "${PLATFORM_ROOT:=$(cd "$(dirname "${BASH_SOURCE[1]:-${BASH_SOURCE[0]}}")" && pwd)}"
 WORKSPACE_DIR="$(cd "$PLATFORM_ROOT/.." && pwd)"
-COMPOSE_FILE="${COMPOSE_FILE:-$PLATFORM_ROOT/deploy/docker-compose.yml}"
+COMPOSE_FILE="${COMPOSE_FILE:-$PLATFORM_ROOT/compose/docker-compose.yml}"
 
 normalize_digits() {
   local input="$1"
@@ -17,7 +17,6 @@ SERVICE_ORDER=(
   redis
   bourse-azma-api
   codal-api
-  fipiran-api
   bourse-azma-ui
 )
 
@@ -25,7 +24,6 @@ REPOS=(
   tsetmc-api
   bourse-azma-api
   codal-api
-  fipiran-api
   bourse-azma-ui
   bourse-azma-platform
 )

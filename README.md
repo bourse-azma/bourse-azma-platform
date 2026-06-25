@@ -10,19 +10,19 @@ This directory is intended to host:
 
 ## Current Structure
 
-- `deploy/`: deployment artifacts (currently Docker Compose)
-- `docs/`: operational and technical documentation
-- `shared/`: shared code and reusable resources across services
+- `compose/`: Docker Compose stack for local and shared environments
+- `scripts/`: platform shell helpers used by `platform.sh`
+- `platform.sh`: main entry point for start/stop, logs, git update, and deploy
 
 ## Current Compose Stack
 
-File: `deploy/docker-compose.yml`
+File: `compose/docker-compose.yml`
 
 Included services:
 
 - `bourse-azma-db` (PostgreSQL)
+- `redis`
 - `tsetmc-api` on `9000:9000`
-- `fipiran-api` on `9001:9001`
 - `codal-api` on `9002:9002`
 - `bourse-azma-api` on `9003:9003`
 - `bourse-azma-ui` on `8080:8080`
@@ -50,7 +50,7 @@ cd bourse-azma-platform
 ## Manual Compose Usage
 
 ```bash
-cd bourse-azma-platform/deploy
+cd bourse-azma-platform/compose
 docker compose up --build -d
 ```
 
@@ -62,7 +62,7 @@ docker compose down
 
 ## Security Note (JWT Secret)
 
-In `deploy/docker-compose.yml`, the value of `APP_SECURITY_JWT_SECRET` is only a sample value for local development.
+In `compose/docker-compose.yml`, the value of `APP_SECURITY_JWT_SECRET` is only a sample value for local development.
 
 For better security, change it before running in any shared/staging/production environment.
 
@@ -78,15 +78,8 @@ Create this file:
 
 - `bourse-azma-ui/.env`
 
-Use these values (matched to the `deploy/docker-compose.yml` stack):
+Copy from `bourse-azma-ui/.env.example` and adjust values for your environment. The compose stack mounts this file into
+`tsetmc-api` and `codal-api`.
 
-```env
-VITE_MARKET_OVERVIEW_API_BASE_URL=/api/tsetmc/overview
-VITE_MARKET_OVERVIEW_REFRESH_MS=10000
-VITE_CODAL_NOTICES_API_BASE_URL=/api/codal/codal/notices
-VITE_CODAL_NOTICES_REFRESH_MS=30000
-VITE_AUTH_API_BASE_URL=/api/auth
-VITE_MARKET_OVERVIEW_PROXY_TARGET=http://localhost:9000
-VITE_CODAL_PROXY_TARGET=http://localhost:9002
-VITE_AUTH_PROXY_TARGET=http://localhost:9003
-```
+For local Vite development outside Docker, keep the proxy targets pointed at the running backend ports (`9000`, `9002`,
+`9003`).
