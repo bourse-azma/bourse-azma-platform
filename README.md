@@ -83,3 +83,12 @@ Copy from `bourse-azma-ui/.env.example` and adjust values for your environment. 
 
 For local Vite development outside Docker, keep the proxy targets pointed at the running backend ports (`9000`, `9002`,
 `9003`).
+
+## API CORS Configuration
+
+CORS settings for `bourse-azma-api` live in `bourse-azma-api/src/main/resources/application.properties` under
+`app.cors.*`. Docker images read the same file from the built JAR, so no extra platform compose change is required for
+local stack ports (`5173` for Vite, `8080` for the UI container).
+
+To override CORS in a deployed environment without rebuilding, set Spring environment variables such as
+`APP_CORS_ALLOWED_ORIGINS`.
