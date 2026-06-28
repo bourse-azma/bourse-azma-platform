@@ -1,13 +1,28 @@
 name: bourse-azma-platform
 
+volumes:
+  bourse-azma-db-data:
+
 services:
   bourse-azma-db:
-    image: postgres:14.22-alpine
+    image: postgres:14-alpine
     container_name: bourse-azma-db
     environment:
       POSTGRES_DB: bourse
       POSTGRES_USER: postgres
       POSTGRES_PASSWORD: 12345
+    command: >
+      postgres
+      -c max_connections=100
+      -c shared_buffers=128MB
+      -c effective_cache_size=256MB
+      -c work_mem=4MB
+      -c maintenance_work_mem=64MB
+      -c checkpoint_completion_target=0.9
+      -c wal_buffers=16MB
+      -c random_page_cost=1.1
+      -c effective_io_concurrency=200
+      -c synchronous_commit=off
     volumes:
       - bourse-azma-db-data:/var/lib/postgresql/data
     healthcheck:
@@ -15,7 +30,48 @@ services:
       interval: 5s
       timeout: 3s
       retries: 20
+      start_period: 10s
     restart: unless-stopped
+    deploy:
+      resources:
+        reservations:
+          memory: 256m
+    logging:
+      driver: json-file
+      options:
+        max-size: "20m"
+        max-file: "3"
+
+  redis:
+    image: redis:7-alpine
+    container_name: bourse-azma-redis
+    command: >
+      redis-server
+      --maxmemory 256mb
+      --maxmemory-policy allkeys-lru
+      --save ""
+      --appendonly no
+      --tcp-backlog 511
+      --hz 20
+      --activerehashing yes
+    ports:
+      - "6379:6379"
+    healthcheck:
+      test: [ "CMD", "redis-cli", "ping" ]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+      start_period: 5s
+    restart: unless-stopped
+    deploy:
+      resources:
+        reservations:
+          memory: 64m
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "2"
 
   tsetmc-api:
     image: tsetmc-api
@@ -29,15 +85,24 @@ services:
     environment:
       SPRING_DATA_REDIS_HOST: redis
     depends_on:
-      - redis
+      redis:
+        condition: service_healthy
+    healthcheck:
+      test: [ "CMD-SHELL", "nc -z -w1 localhost 9000 || exit 1" ]
+      interval: 30s
+      timeout: 5s
+      retries: 5
+      start_period: 60s
     restart: unless-stopped
-
-  redis:
-    image: redis:7-alpine
-    container_name: bourse-azma-redis
-    ports:
-      - "6379:6379"
-    restart: unless-stopped
+    deploy:
+      resources:
+        reservations:
+          memory: 256m
+    logging:
+      driver: json-file
+      options:
+        max-size: "200m"
+        max-file: "5"
 
   codal-api:
     image: codal-api
@@ -51,8 +116,24 @@ services:
     environment:
       SPRING_DATA_REDIS_HOST: redis
     depends_on:
-      - redis
+      redis:
+        condition: service_healthy
+    healthcheck:
+      test: [ "CMD-SHELL", "nc -z -w1 localhost 9002 || exit 1" ]
+      interval: 30s
+      timeout: 5s
+      retries: 5
+      start_period: 60s
     restart: unless-stopped
+    deploy:
+      resources:
+        reservations:
+          memory: 256m
+    logging:
+      driver: json-file
+      options:
+        max-size: "200m"
+        max-file: "5"
 
   bourse-azma-api:
     image: bourse-azma-api
@@ -78,10 +159,25 @@ services:
       bourse-azma-db:
         condition: service_healthy
       redis:
-        condition: service_started
+        condition: service_healthy
       tsetmc-api:
-        condition: service_started
+        condition: service_healthy
+    healthcheck:
+      test: [ "CMD-SHELL", "nc -z -w1 localhost 9003 || exit 1" ]
+      interval: 30s
+      timeout: 5s
+      retries: 5
+      start_period: 90s
     restart: unless-stopped
+    deploy:
+      resources:
+        reservations:
+          memory: 384m
+    logging:
+      driver: json-file
+      options:
+        max-size: "200m"
+        max-file: "5"
 
   bourse-azma-ui:
     image: bourse-azma-ui
@@ -91,10 +187,19 @@ services:
     ports:
       - "8080:8080"
     depends_on:
-      - tsetmc-api
-      - codal-api
-      - bourse-azma-api
+      tsetmc-api:
+        condition: service_healthy
+      codal-api:
+        condition: service_healthy
+      bourse-azma-api:
+        condition: service_healthy
     restart: unless-stopped
-
-volumes:
-  bourse-azma-db-data:
+    deploy:
+      resources:
+        reservations:
+          memory: 32m
+    logging:
+      driver: json-file
+      options:
+        max-size: "20m"
+        max-file: "2"
