@@ -13,13 +13,13 @@ services:
       POSTGRES_PASSWORD: 12345
     command: >
       postgres
-      -c max_connections=100
-      -c shared_buffers=128MB
-      -c effective_cache_size=256MB
+      -c max_connections=40
+      -c shared_buffers=64MB
+      -c effective_cache_size=192MB
       -c work_mem=4MB
-      -c maintenance_work_mem=64MB
+      -c maintenance_work_mem=32MB
       -c checkpoint_completion_target=0.9
-      -c wal_buffers=16MB
+      -c wal_buffers=8MB
       -c random_page_cost=1.1
       -c effective_io_concurrency=200
       -c synchronous_commit=off
@@ -34,8 +34,11 @@ services:
     restart: unless-stopped
     deploy:
       resources:
+        limits:
+          cpus: "0.50"
+          memory: 320m
         reservations:
-          memory: 256m
+          memory: 96m
     logging:
       driver: json-file
       options:
@@ -47,12 +50,12 @@ services:
     container_name: bourse-azma-redis
     command: >
       redis-server
-      --maxmemory 256mb
+      --maxmemory 64mb
       --maxmemory-policy allkeys-lru
       --save ""
       --appendonly no
       --tcp-backlog 511
-      --hz 20
+      --hz 10
       --activerehashing yes
     ports:
       - "6379:6379"
@@ -65,8 +68,11 @@ services:
     restart: unless-stopped
     deploy:
       resources:
+        limits:
+          cpus: "0.30"
+          memory: 96m
         reservations:
-          memory: 64m
+          memory: 32m
     logging:
       driver: json-file
       options:
@@ -96,8 +102,11 @@ services:
     restart: unless-stopped
     deploy:
       resources:
+        limits:
+          cpus: "0.75"
+          memory: 384m
         reservations:
-          memory: 256m
+          memory: 128m
     logging:
       driver: json-file
       options:
@@ -127,8 +136,11 @@ services:
     restart: unless-stopped
     deploy:
       resources:
+        limits:
+          cpus: "0.60"
+          memory: 320m
         reservations:
-          memory: 256m
+          memory: 96m
     logging:
       driver: json-file
       options:
@@ -171,8 +183,11 @@ services:
     restart: unless-stopped
     deploy:
       resources:
+        limits:
+          cpus: "0.75"
+          memory: 448m
         reservations:
-          memory: 384m
+          memory: 160m
     logging:
       driver: json-file
       options:
@@ -196,8 +211,11 @@ services:
     restart: unless-stopped
     deploy:
       resources:
+        limits:
+          cpus: "0.30"
+          memory: 64m
         reservations:
-          memory: 32m
+          memory: 16m
     logging:
       driver: json-file
       options:
