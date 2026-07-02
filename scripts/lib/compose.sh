@@ -91,11 +91,61 @@ run_compose_action() {
   return 1
 }
 
+ensure_resource_profile() {
+  if [[ "${CONFIGURE_RESOURCES:-1}" != "1" ]]; then
+    return 0
+  fi
+
+  if [[ ! -x "$PLATFORM_ROOT/scripts/configure-resources.sh" ]]; then
+    return 0
+  fi
+
+  "$PLATFORM_ROOT/scripts/configure-resources.sh" --auto || warn "Resource configuration skipped."
+}
+
+compose_up() {
+  local -a build_flag=()
+  local -a services=()
+
+  while [[ $# -gt 0 ]]; do
+    case "$1" in
+      --build)
+        build_flag=(--build)
+        shift
+        ;;
+      *)
+        services+=("$1")
+        shift
+        ;;
+    esac
+  done
+
+  if ((${#build_flag[@]})); then
+    if ((${#services[@]})); then
+      run_compose_action up "${build_flag[@]}" -d "${services[@]}"
+    else
+      run_compose_action up "${build_flag[@]}" -d
+    fi
+  elif ((${#services[@]})); then
+    run_compose_action up -d "${services[@]}"
+  else
+    run_compose_action up -d
+  fi
+}
+
 platform_start() {
   cleanup_workspace_appledouble
+  ensure_resource_profile
 
-  local build_flag=(--build)
-  [[ "${NO_BUILD:-0}" == "1" ]] && build_flag=()
+  local use_compose_build=0
+  if [[ "${NO_BUILD:-0}" != "1" ]]; then
+    if [[ -x "$PLATFORM_ROOT/scripts/build-sequential.sh" ]]; then
+      info "Building images sequentially (low peak memory)..."
+      "$PLATFORM_ROOT/scripts/build-sequential.sh" || return 1
+    else
+      use_compose_build=1
+    fi
+  fi
 
   local running total
   running="$(count_running_services)"
@@ -112,7 +162,11 @@ platform_start() {
     info "Starting services..."
   fi
 
-  run_compose_action up "${build_flag[@]}" -d
+  if [[ "$use_compose_build" == "1" ]]; then
+    compose_up --build
+  else
+    compose_up
+  fi
 }
 
 platform_stop() {
@@ -134,9 +188,15 @@ platform_stop() {
 
 platform_restart() {
   cleanup_workspace_appledouble
+  ensure_resource_profile
 
-  local build_flag=(--build)
-  [[ "${NO_BUILD:-0}" == "1" ]] && build_flag=()
+  local use_compose_build=0
+  if [[ "${NO_BUILD:-0}" != "1" && -x "$PLATFORM_ROOT/scripts/build-sequential.sh" ]]; then
+    info "Building images sequentially (low peak memory)..."
+    "$PLATFORM_ROOT/scripts/build-sequential.sh" || return 1
+  elif [[ "${NO_BUILD:-0}" != "1" ]]; then
+    use_compose_build=1
+  fi
 
   if ! docker_ready || ! compose_file_ready; then
     return 1
@@ -144,7 +204,11 @@ platform_restart() {
 
   if [[ "${#SELECTED_SERVICES[@]}" -eq 0 ]]; then
     info "Restarting all services..."
-    run_compose_action up "${build_flag[@]}" -d
+    if [[ "$use_compose_build" == "1" ]]; then
+      compose_up --build
+    else
+      compose_up
+    fi
     return $?
   fi
 
@@ -157,7 +221,11 @@ platform_restart() {
   done
 
   info "Restarting: ${SELECTED_SERVICES[*]}"
-  run_compose_action up "${build_flag[@]}" -d "${SELECTED_SERVICES[@]}"
+  if [[ "$use_compose_build" == "1" ]]; then
+    compose_up --build "${SELECTED_SERVICES[@]}"
+  else
+    compose_up "${SELECTED_SERVICES[@]}"
+  fi
 }
 
 platform_status() {

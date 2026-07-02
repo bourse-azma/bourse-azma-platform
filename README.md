@@ -50,9 +50,25 @@ cd bourse-azma-platform
 ## Manual Compose Usage
 
 ```bash
-cd bourse-azma-platform/compose
-docker compose up --build -d
+cd bourse-azma-platform
+
+# 1. Auto-configure resources for your host (writes compose/.env)
+./scripts/configure-resources.sh --force
+
+# 2. Build images sequentially (peak build memory stays under 2 GB)
+./scripts/build-sequential.sh
+
+# 3. Start the stack
+cd compose && docker compose up -d
 ```
+
+Or use the platform script (runs configure + sequential build automatically):
+
+```bash
+./platform.sh start
+```
+
+For **1 vCPU / 1 GB RAM** deployments, see [`OPTIMIZATION_SUMMARY.md`](OPTIMIZATION_SUMMARY.md).
 
 Stop:
 
