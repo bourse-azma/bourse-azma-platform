@@ -10,6 +10,8 @@ source "$SCRIPT_DIR/scripts/lib/common.sh"
 source "$SCRIPT_DIR/scripts/lib/compose.sh"
 # shellcheck source=scripts/lib/git.sh
 source "$SCRIPT_DIR/scripts/lib/git.sh"
+# shellcheck source=scripts/lib/remote-deploy.sh
+source "$SCRIPT_DIR/scripts/lib/remote-deploy.sh"
 
 SELECTED_SERVICES=()
 NO_BUILD=0
@@ -33,7 +35,7 @@ parse_args() {
       usage
       exit 0
       ;;
-    start|stop|restart|status|logs|update|deploy|menu)
+    start|stop|restart|status|logs|update|deploy|remote-deploy|menu)
       COMMAND="$1"
       shift
       ;;
@@ -101,6 +103,9 @@ run_command() {
       ;;
     deploy)
       platform_deploy
+      ;;
+    remote-deploy)
+      platform_remote_deploy
       ;;
     menu)
       platform_menu
@@ -221,14 +226,15 @@ ${C_BOLD}${C_CYAN}===== Bourse Azma Platform =====${C_RESET}
 4) Git update
 5) Status
 6) Logs
-7) Exit
+7) Remote deploy
+8) Exit
 MENU
 }
 
 platform_menu() {
   while true; do
     print_menu
-    if ! read -r -p "Choose an option [1-7]: " choice; then
+    if ! read -r -p "Choose an option [1-8]: " choice; then
       echo
       info "Exiting."
       exit 0
@@ -243,12 +249,13 @@ platform_menu() {
       4) run_menu_action platform_update ;;
       5) run_menu_action platform_status ;;
       6) run_menu_action menu_show_logs ;;
-      7)
+      7) run_menu_action platform_remote_deploy ;;
+      8)
         info "Exiting."
         exit 0
         ;;
       *)
-        warn "Invalid option. Please choose 1-7."
+        warn "Invalid option. Please choose 1-8."
         ;;
     esac
   done

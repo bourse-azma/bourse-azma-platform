@@ -1,0 +1,219 @@
+name: bourse-azma-platform
+
+volumes:
+  bourse-azma-db-data:
+
+x-java-runtime: &java-runtime
+  SERVER_TOMCAT_MAX_CONNECTIONS: ${SERVER_TOMCAT_MAX_CONNECTIONS:-80}
+  SERVER_TOMCAT_ACCEPT_COUNT: ${SERVER_TOMCAT_ACCEPT_COUNT:-20}
+  SERVER_TOMCAT_THREADS_MAX: ${SERVER_TOMCAT_THREADS_MAX:-25}
+  SERVER_TOMCAT_THREADS_MIN_SPARE: ${SERVER_TOMCAT_THREADS_MIN_SPARE:-2}
+  SPRING_LIFECYCLE_TIMEOUT_PER_SHUTDOWN_PHASE: ${SPRING_LIFECYCLE_TIMEOUT_PER_SHUTDOWN_PHASE:-20s}
+
+# Remote/production compose file.
+#
+# Differences vs. compose/docker-compose.yml:
+#  - No `build:` sections. Images are pre-built locally, saved with
+#    `docker save`, copied to the server and loaded with `docker load`.
+#    Image names/tags below MUST match what remote-deploy.sh builds and loads.
+#  - Only bourse-azma-ui is published to the host, on 443 -> 8080 (TLS
+#    terminated by nginx inside the container using a Let's Encrypt cert
+#    mounted from the host). All other services (db, redis, tsetmc-api,
+#    codal-api, bourse-azma-api) have NO host port bindings: they are only
+#    reachable from other containers on the compose network, never from
+#    the internet.
+services:
+  bourse-azma-db:
+    image: postgres:14-alpine
+    container_name: bourse-azma-db
+    environment:
+      POSTGRES_DB: bourse
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: 12345
+    command: >
+      postgres
+      -c max_connections=${POSTGRES_MAX_CONNECTIONS:-20}
+      -c shared_buffers=${POSTGRES_SHARED_BUFFERS:-16MB}
+      -c effective_cache_size=${POSTGRES_EFFECTIVE_CACHE_SIZE:-48MB}
+      -c work_mem=${POSTGRES_WORK_MEM:-1MB}
+      -c maintenance_work_mem=${POSTGRES_MAINTENANCE_WORK_MEM:-8MB}
+      -c checkpoint_completion_target=0.9
+      -c wal_buffers=2MB
+      -c random_page_cost=1.1
+      -c effective_io_concurrency=200
+      -c synchronous_commit=off
+    volumes:
+      - bourse-azma-db-data:/var/lib/postgresql/data
+    healthcheck:
+      test: [ "CMD-SHELL", "pg_isready -U postgres -d bourse" ]
+      interval: 10s
+      timeout: 3s
+      retries: 15
+      start_period: 15s
+    restart: unless-stopped
+    mem_limit: ${DB_MEM_LIMIT:-96m}
+    cpus: ${DB_CPU_LIMIT:-0.30}
+    logging:
+      driver: json-file
+      options:
+        max-size: "5m"
+        max-file: "2"
+
+  redis:
+    image: redis:7-alpine
+    container_name: bourse-azma-redis
+    command: >
+      redis-server
+      --maxmemory ${REDIS_MAXMEMORY:-16mb}
+      --maxmemory-policy allkeys-lru
+      --save ""
+      --appendonly no
+      --tcp-backlog 64
+      --hz 10
+      --activerehashing yes
+    healthcheck:
+      test: [ "CMD", "redis-cli", "ping" ]
+      interval: 10s
+      timeout: 3s
+      retries: 10
+      start_period: 5s
+    restart: unless-stopped
+    mem_limit: ${REDIS_MEM_LIMIT:-32m}
+    cpus: ${REDIS_CPU_LIMIT:-0.10}
+    logging:
+      driver: json-file
+      options:
+        max-size: "3m"
+        max-file: "2"
+
+  tsetmc-api:
+    image: tsetmc-api:latest
+    container_name: tsetmc-api
+    env_file:
+      - ../../bourse-azma-ui/.env
+    environment:
+      <<: *java-runtime
+      SPRING_DATA_REDIS_HOST: redis
+      JAVA_TOOL_OPTIONS: ${TSETMC_API_JAVA_OPTS:--XX:+UseSerialGC -XX:+UseContainerSupport -Xms24m -Xmx56m -Xss256k -XX:MaxMetaspaceSize=72m -XX:MaxDirectMemorySize=16m -XX:TieredStopAtLevel=1 -XX:+ExitOnOutOfMemoryError -Djava.security.egd=file:/dev/./urandom -Dfile.encoding=UTF-8}
+      SPRING_DATA_REDIS_LETTUCE_POOL_MAX_ACTIVE: ${TSETMC_API_REDIS_POOL_MAX_ACTIVE:-3}
+      SPRING_DATA_REDIS_LETTUCE_POOL_MIN_IDLE: ${TSETMC_API_REDIS_POOL_MIN_IDLE:-0}
+    depends_on:
+      redis:
+        condition: service_healthy
+    stop_grace_period: 30s
+    healthcheck:
+      test: [ "CMD-SHELL", "nc -z -w1 localhost 9000 || exit 1" ]
+      interval: 30s
+      timeout: 5s
+      retries: 5
+      start_period: 45s
+    restart: unless-stopped
+    mem_limit: ${TSETMC_API_MEM_LIMIT:-144m}
+    cpus: ${TSETMC_API_CPU_LIMIT:-0.30}
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "2"
+
+  codal-api:
+    image: codal-api:latest
+    container_name: codal-api
+    env_file:
+      - ../../bourse-azma-ui/.env
+    environment:
+      <<: *java-runtime
+      SPRING_DATA_REDIS_HOST: redis
+      JAVA_TOOL_OPTIONS: ${CODAL_API_JAVA_OPTS:--XX:+UseSerialGC -XX:+UseContainerSupport -Xms24m -Xmx56m -Xss256k -XX:MaxMetaspaceSize=72m -XX:MaxDirectMemorySize=16m -XX:TieredStopAtLevel=1 -XX:+ExitOnOutOfMemoryError -Djava.security.egd=file:/dev/./urandom -Dfile.encoding=UTF-8}
+      SPRING_DATA_REDIS_LETTUCE_POOL_MAX_ACTIVE: ${CODAL_API_REDIS_POOL_MAX_ACTIVE:-3}
+      SPRING_DATA_REDIS_LETTUCE_POOL_MIN_IDLE: ${CODAL_API_REDIS_POOL_MIN_IDLE:-0}
+    depends_on:
+      redis:
+        condition: service_healthy
+      tsetmc-api:
+        condition: service_healthy
+    stop_grace_period: 30s
+    healthcheck:
+      test: [ "CMD-SHELL", "nc -z -w1 localhost 9002 || exit 1" ]
+      interval: 30s
+      timeout: 5s
+      retries: 5
+      start_period: 45s
+    restart: unless-stopped
+    mem_limit: ${CODAL_API_MEM_LIMIT:-144m}
+    cpus: ${CODAL_API_CPU_LIMIT:-0.20}
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "2"
+
+  bourse-azma-api:
+    image: bourse-azma-api:latest
+    container_name: bourse-azma-api
+    environment:
+      <<: *java-runtime
+      SERVER_PORT: 9003
+      SPRING_DATASOURCE_URL: jdbc:postgresql://bourse-azma-db:5432/bourse
+      SPRING_DATASOURCE_USERNAME: postgres
+      SPRING_DATASOURCE_PASSWORD: 12345
+      SPRING_DATA_REDIS_HOST: redis
+      SPRING_DATA_REDIS_PORT: 6379
+      APP_SECURITY_JWT_SECRET: bourse-azma-jwt-secret-key-with-at-least-32-bytes
+      APP_MARKET_SEARCH_CSV_PATH: /app/market.csv
+      APP_TSETMC_BASE_URL: http://tsetmc-api:9000/tsetmc
+      APP_ORDER_MATCHING_ENABLED: "true"
+      APP_ORDER_MATCHING_POLL_INTERVAL_MS: 5000
+      APP_CORS_ALLOWED_ORIGINS: ${APP_CORS_ALLOWED_ORIGINS:-https://bourseazma.ir}
+      JAVA_TOOL_OPTIONS: ${BOURSE_AZMA_API_JAVA_OPTS:--XX:+UseSerialGC -XX:+UseContainerSupport -Xms48m -Xmx112m -Xss256k -XX:MaxMetaspaceSize=128m -XX:MaxDirectMemorySize=16m -XX:TieredStopAtLevel=1 -XX:+ExitOnOutOfMemoryError -Djava.security.egd=file:/dev/./urandom -Dfile.encoding=UTF-8}
+      SPRING_DATASOURCE_HIKARI_MAXIMUM_POOL_SIZE: ${BOURSE_AZMA_API_HIKARI_MAX_POOL:-4}
+      SPRING_DATASOURCE_HIKARI_MINIMUM_IDLE: ${BOURSE_AZMA_API_HIKARI_MIN_IDLE:-1}
+      SPRING_DATA_REDIS_LETTUCE_POOL_MAX_ACTIVE: ${BOURSE_AZMA_API_REDIS_POOL_MAX_ACTIVE:-4}
+      SPRING_DATA_REDIS_LETTUCE_POOL_MIN_IDLE: ${BOURSE_AZMA_API_REDIS_POOL_MIN_IDLE:-0}
+    depends_on:
+      bourse-azma-db:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      tsetmc-api:
+        condition: service_healthy
+      codal-api:
+        condition: service_healthy
+    stop_grace_period: 30s
+    healthcheck:
+      test: [ "CMD-SHELL", "nc -z -w1 localhost 9003 || exit 1" ]
+      interval: 30s
+      timeout: 5s
+      retries: 5
+      start_period: 90s
+    restart: unless-stopped
+    mem_limit: ${BOURSE_AZMA_API_MEM_LIMIT:-288m}
+    cpus: ${BOURSE_AZMA_API_CPU_LIMIT:-0.30}
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "2"
+
+  bourse-azma-ui:
+    image: bourse-azma-ui:latest
+    container_name: bourse-azma-ui
+    ports:
+      - "443:8080"
+    volumes:
+      - /opt/bourse-azma-certs:/etc/nginx/ssl:ro
+    depends_on:
+      tsetmc-api:
+        condition: service_healthy
+      codal-api:
+        condition: service_healthy
+      bourse-azma-api:
+        condition: service_healthy
+    restart: unless-stopped
+    mem_limit: ${BOURSE_AZMA_UI_MEM_LIMIT:-24m}
+    cpus: ${BOURSE_AZMA_UI_CPU_LIMIT:-0.08}
+    logging:
+      driver: json-file
+      options:
+        max-size: "3m"
+        max-file: "2"

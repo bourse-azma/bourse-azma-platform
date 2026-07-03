@@ -73,6 +73,9 @@ Commands:
   logs               View service logs
   update             Git pull all workspace repositories
   deploy             Update repos and restart services
+  remote-deploy      Build images locally and deploy them to a remote server
+                     over SSH (first run also provisions the server: Docker,
+                     ArvanCloud mirror, postgres/redis, Let's Encrypt TLS)
   menu               Interactive menu (default when no command is given)
 
 Options:
@@ -88,6 +91,8 @@ Examples:
   $(basename "$0") logs --service tsetmc-api --follow
   $(basename "$0") update
   $(basename "$0") deploy
+  $(basename "$0") remote-deploy
+  REMOTE_HOST=1.2.3.4 REMOTE_USER=ubuntu REMOTE_PASSWORD=secret $(basename "$0") remote-deploy
 
 Workspace: $WORKSPACE_DIR
 Compose:   $COMPOSE_FILE
