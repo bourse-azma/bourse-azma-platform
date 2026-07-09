@@ -2,6 +2,7 @@ name: bourse-azma-platform
 
 volumes:
   bourse-azma-db-data:
+  bourse-azma-redis-data:
 
 x-java-runtime: &java-runtime
   SERVER_TOMCAT_MAX_CONNECTIONS: ${SERVER_TOMCAT_MAX_CONNECTIONS:-80}
@@ -66,6 +67,8 @@ services:
       --tcp-backlog 64
       --hz 10
       --activerehashing yes
+    volumes:
+      - bourse-azma-redis-data:/data
     ports:
       - "6379:6379"
     healthcheck:
