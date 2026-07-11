@@ -4,6 +4,18 @@ volumes:
   bourse-azma-db-data:
   bourse-azma-redis-data:
 
+secrets:
+  postgres_username:
+    file: ./secrets/postgres_username
+  postgres_password:
+    file: ./secrets/postgres_password
+  bootstrap_admin_password:
+    file: ./secrets/bootstrap_admin_password
+
+networks:
+  edge:
+  backend:
+
 x-java-runtime: &java-runtime
   SERVER_TOMCAT_MAX_CONNECTIONS: ${SERVER_TOMCAT_MAX_CONNECTIONS:-80}
   SERVER_TOMCAT_ACCEPT_COUNT: ${SERVER_TOMCAT_ACCEPT_COUNT:-20}
@@ -29,8 +41,11 @@ services:
     container_name: bourse-azma-db
     environment:
       POSTGRES_DB: bourse
-      POSTGRES_USER: postgres
-      POSTGRES_PASSWORD: 12345
+      POSTGRES_USER_FILE: /run/secrets/postgres_username
+      POSTGRES_PASSWORD_FILE: /run/secrets/postgres_password
+    secrets:
+      - postgres_username
+      - postgres_password
     command: >
       postgres
       -c max_connections=${POSTGRES_MAX_CONNECTIONS:-20}
@@ -46,12 +61,16 @@ services:
     volumes:
       - bourse-azma-db-data:/var/lib/postgresql/data
     healthcheck:
-      test: [ "CMD-SHELL", "pg_isready -U postgres -d bourse" ]
+      test: [ "CMD-SHELL", "pg_isready -U $$(cat /run/secrets/postgres_username) -d bourse" ]
       interval: 10s
       timeout: 3s
       retries: 15
       start_period: 15s
     restart: unless-stopped
+    networks:
+      - backend
+    security_opt:
+      - no-new-privileges:true
     mem_limit: ${DB_MEM_LIMIT:-96m}
     cpus: ${DB_CPU_LIMIT:-0.30}
     logging:
@@ -81,6 +100,10 @@ services:
       retries: 10
       start_period: 5s
     restart: unless-stopped
+    networks:
+      - backend
+    security_opt:
+      - no-new-privileges:true
     mem_limit: ${REDIS_MEM_LIMIT:-32m}
     cpus: ${REDIS_CPU_LIMIT:-0.10}
     logging:
@@ -111,6 +134,10 @@ services:
       retries: 5
       start_period: 45s
     restart: unless-stopped
+    networks:
+      - backend
+    security_opt:
+      - no-new-privileges:true
     mem_limit: ${TSETMC_API_MEM_LIMIT:-144m}
     cpus: ${TSETMC_API_CPU_LIMIT:-0.30}
     logging:
@@ -143,6 +170,10 @@ services:
       retries: 5
       start_period: 45s
     restart: unless-stopped
+    networks:
+      - backend
+    security_opt:
+      - no-new-privileges:true
     mem_limit: ${CODAL_API_MEM_LIMIT:-144m}
     cpus: ${CODAL_API_CPU_LIMIT:-0.20}
     logging:
@@ -158,11 +189,9 @@ services:
       <<: *java-runtime
       SERVER_PORT: 9003
       SPRING_DATASOURCE_URL: jdbc:postgresql://bourse-azma-db:5432/bourse
-      SPRING_DATASOURCE_USERNAME: postgres
-      SPRING_DATASOURCE_PASSWORD: 12345
+      SPRING_CONFIG_IMPORT: optional:configtree:/run/secrets/
       SPRING_DATA_REDIS_HOST: redis
       SPRING_DATA_REDIS_PORT: 6379
-      APP_SECURITY_JWT_SECRET: bourse-azma-jwt-secret-key-with-at-least-32-bytes
       APP_MARKET_SEARCH_CSV_PATH: /app/market.csv
       APP_TSETMC_BASE_URL: http://tsetmc-api:9000/tsetmc
       APP_ORDER_MATCHING_ENABLED: "true"
@@ -173,6 +202,13 @@ services:
       SPRING_DATASOURCE_HIKARI_MINIMUM_IDLE: ${BOURSE_AZMA_API_HIKARI_MIN_IDLE:-1}
       SPRING_DATA_REDIS_LETTUCE_POOL_MAX_ACTIVE: ${BOURSE_AZMA_API_REDIS_POOL_MAX_ACTIVE:-4}
       SPRING_DATA_REDIS_LETTUCE_POOL_MIN_IDLE: ${BOURSE_AZMA_API_REDIS_POOL_MIN_IDLE:-0}
+    secrets:
+      - source: postgres_username
+        target: spring.datasource.username
+      - source: postgres_password
+        target: spring.datasource.password
+      - source: bootstrap_admin_password
+        target: app.bootstrap.admin.password
     depends_on:
       bourse-azma-db:
         condition: service_healthy
@@ -190,6 +226,10 @@ services:
       retries: 5
       start_period: 90s
     restart: unless-stopped
+    networks:
+      - backend
+    security_opt:
+      - no-new-privileges:true
     mem_limit: ${BOURSE_AZMA_API_MEM_LIMIT:-288m}
     cpus: ${BOURSE_AZMA_API_CPU_LIMIT:-0.30}
     logging:
@@ -202,6 +242,7 @@ services:
     image: bourse-azma-ui:latest
     container_name: bourse-azma-ui
     ports:
+      - "80:8081"
       - "443:8080"
     volumes:
       - /opt/bourse-azma-certs:/etc/nginx/ssl:ro
@@ -212,7 +253,18 @@ services:
         condition: service_healthy
       bourse-azma-api:
         condition: service_healthy
+    healthcheck:
+      test: [ "CMD-SHELL", "wget -qO- --no-check-certificate https://127.0.0.1:8080/healthz | grep -qx ok" ]
+      interval: 15s
+      timeout: 5s
+      retries: 5
+      start_period: 10s
     restart: unless-stopped
+    networks:
+      - edge
+      - backend
+    security_opt:
+      - no-new-privileges:true
     mem_limit: ${BOURSE_AZMA_UI_MEM_LIMIT:-24m}
     cpus: ${BOURSE_AZMA_UI_CPU_LIMIT:-0.08}
     logging:

@@ -1,18 +1,11 @@
 #!/usr/bin/env bash
-#
-# Remote deploy: provisions a fresh Ubuntu server (Docker + Arvan mirror +
-# Let's Encrypt) once, then builds all images locally, ships them to the
-# server with docker save/load, and starts the stack with the production
-# compose file (compose/docker-compose.remote.yml).
-#
-# All steps are idempotent: re-running only rebuilds/reships images and
-# restarts the stack. Server provisioning (mirror, docker install,
-# postgres/redis pull, TLS certificate) is skipped automatically once done.
+# Hardened, idempotent remote deployment for a fresh Ubuntu host.
 
 REMOTE_DOMAIN="${REMOTE_DOMAIN:-bourseazma.ir}"
-REMOTE_APP_DIR="${REMOTE_APP_DIR:-~/bourse-azma-deploy}"
-REMOTE_DOCKER_MARKER="\$HOME/.bourse-azma-docker-provisioned"
-ARVAN_MIRROR_URL="https://docker.arvancloud.ir"
+REMOTE_APP_DIR="${REMOTE_APP_DIR:-}"
+REMOTE_HEALTH_TIMEOUT="${REMOTE_HEALTH_TIMEOUT:-360}"
+ARVAN_DOCKER_MIRROR="${ARVAN_DOCKER_MIRROR:-https://docker.arvancloud.ir}"
+ARVAN_UBUNTU_MIRROR="${ARVAN_UBUNTU_MIRROR:-https://mirror.arvancloud.ir/ubuntu}"
 
 REMOTE_IMAGES=(
   "tsetmc-api|$WORKSPACE_DIR/tsetmc-api|Dockerfile"
@@ -22,30 +15,30 @@ REMOTE_IMAGES=(
 )
 
 remote_ssh_opts=(
-  -o StrictHostKeyChecking=no
-  -o UserKnownHostsFile=/dev/null
+  -o StrictHostKeyChecking=accept-new
   -o LogLevel=ERROR
-  -o ConnectTimeout=60
+  -o PreferredAuthentications=password,keyboard-interactive
+  -o PubkeyAuthentication=no
+  -o ControlMaster=auto
+  -o ControlPersist=600
+  -o ControlPath=/tmp/bourse-azma-ssh-%C
+  -o ConnectTimeout=30
   -o ServerAliveInterval=15
   -o ServerAliveCountMax=6
 )
 
 rd_ensure_sshpass() {
-  if command -v sshpass >/dev/null 2>&1; then
-    return 0
-  fi
-
-  warn "'sshpass' is not installed; attempting to install it..."
+  command -v sshpass >/dev/null 2>&1 && return 0
+  warn "'sshpass' is required for password-based deployment; attempting installation."
   if [[ "$(uname -s)" == "Darwin" ]] && command -v brew >/dev/null 2>&1; then
     brew install hudochenkov/sshpass/sshpass || brew install sshpass
   elif command -v apt-get >/dev/null 2>&1; then
     sudo apt-get update -y && sudo apt-get install -y sshpass
   fi
-
-  if ! command -v sshpass >/dev/null 2>&1; then
-    err "Could not install 'sshpass' automatically. Please install it and re-run."
+  command -v sshpass >/dev/null 2>&1 || {
+    err "Could not install sshpass. Install it or configure the deployment host manually."
     return 1
-  fi
+  }
 }
 
 rd_ssh() {
@@ -57,261 +50,331 @@ rd_scp() {
 }
 
 rd_prompt_credentials() {
-  if [[ -z "${REMOTE_HOST:-}" ]]; then
-    read -r -p "Server IP: " REMOTE_HOST
-  fi
-  if [[ -z "${REMOTE_USER:-}" ]]; then
-    read -r -p "SSH user: " REMOTE_USER
-  fi
+  [[ -n "${REMOTE_HOST:-}" ]] || read -r -p "Server IP or hostname: " REMOTE_HOST
+  [[ -n "${REMOTE_USER:-}" ]] || read -r -p "SSH user: " REMOTE_USER
   if [[ -z "${REMOTE_PASSWORD:-}" ]]; then
     read -r -s -p "SSH password: " REMOTE_PASSWORD
     echo
   fi
 
-  if [[ -z "$REMOTE_HOST" || -z "$REMOTE_USER" || -z "$REMOTE_PASSWORD" ]]; then
-    err "Server IP, user and password are all required."
-    return 1
-  fi
+  [[ "$REMOTE_HOST" =~ ^[A-Za-z0-9._:-]+$ ]] || { err "Invalid remote host."; return 1; }
+  [[ "$REMOTE_USER" =~ ^[a-z_][a-z0-9_-]*$ ]] || { err "Invalid remote user."; return 1; }
+  REMOTE_APP_DIR="${REMOTE_APP_DIR:-/home/$REMOTE_USER/bourse-azma-deploy}"
+  [[ "$REMOTE_APP_DIR" =~ ^/[A-Za-z0-9._/-]+$ ]] || { err "REMOTE_APP_DIR must be an absolute safe path."; return 1; }
+  [[ "$REMOTE_DOMAIN" =~ ^[A-Za-z0-9.-]+$ ]] || { err "Invalid remote domain."; return 1; }
 }
 
 rd_check_connectivity() {
   info "Checking SSH connectivity to $REMOTE_USER@$REMOTE_HOST..."
-  if ! rd_ssh "echo connected" >/dev/null 2>&1; then
-    err "Could not connect to $REMOTE_USER@$REMOTE_HOST. Check IP/user/password and SSH access."
+  rd_ssh "true" >/dev/null 2>&1 || {
+    err "Could not connect to $REMOTE_USER@$REMOTE_HOST."
     return 1
-  fi
+  }
   ok "Connected to $REMOTE_HOST."
 }
 
-rd_install_cert_renewal_hook() {
-  info "Registering certbot renewal hook to refresh certs and restart UI..."
-  rd_ssh "sudo mkdir -p /etc/letsencrypt/renewal-hooks/deploy && \
-    printf '%s\n' \
-      '#!/bin/sh' \
-      'set -e' \
-      'mkdir -p /opt/bourse-azma-certs' \
-      'cp -L /etc/letsencrypt/live/$REMOTE_DOMAIN/fullchain.pem /opt/bourse-azma-certs/' \
-      'cp -L /etc/letsencrypt/live/$REMOTE_DOMAIN/privkey.pem /opt/bourse-azma-certs/' \
-      'chmod 644 /opt/bourse-azma-certs/*' \
-      'cd $REMOTE_APP_DIR/bourse-azma-platform/compose && docker compose restart bourse-azma-ui' | \
-    sudo tee /etc/letsencrypt/renewal-hooks/deploy/restart-bourse-ui.sh >/dev/null && \
-    sudo chmod +x /etc/letsencrypt/renewal-hooks/deploy/restart-bourse-ui.sh"
+rd_provision_os() {
+  info "Updating and hardening the Ubuntu host..."
+  if ! rd_ssh "bash -s" <<'REMOTE_SCRIPT'
+set -euo pipefail
+export DEBIAN_FRONTEND=noninteractive
+
+codename="$(. /etc/os-release && printf '%s' "${VERSION_CODENAME:-}")"
+command -v curl >/dev/null 2>&1 || { sudo apt-get update -o Acquire::ForceIPv4=true; sudo apt-get install -y curl ca-certificates; }
+
+# Desktop/AppStream metadata is not needed on a server and is often the last
+# part of a mirror sync, so do not let it make an otherwise healthy mirror fail.
+sudo tee /etc/apt/apt.conf.d/99-bourse-azma-server-indexes >/dev/null <<'EOF'
+Acquire::Retries "2";
+Acquire::http::Timeout "20";
+Acquire::https::Timeout "20";
+Acquire::ForceIPv4 "true";
+Acquire::IndexTargets::deb::DEP-11::DefaultEnabled "false";
+Acquire::IndexTargets::deb::DEP-11-icons-small::DefaultEnabled "false";
+Acquire::IndexTargets::deb::DEP-11-icons::DefaultEnabled "false";
+EOF
+
+source_file=/etc/apt/sources.list.d/ubuntu.sources
+if [ -f "$source_file" ]; then
+  sudo cp --update=none "$source_file" "$source_file.bourse-azma-backup" 2>/dev/null || true
+else
+  source_file=/etc/apt/sources.list
+  sudo cp --update=none "$source_file" "$source_file.bourse-azma-backup" 2>/dev/null || true
+fi
+
+mirror_ready=false
+if sudo apt-get update -y; then
+  mirror_ready=true
+else
+  for mirror in \
+    https://mirror.arvancloud.ir/ubuntu \
+    https://mirror.iranserver.com/ubuntu \
+    https://ubuntu.pishgaman.net/ubuntu \
+    https://mirror.abrha.net/ubuntu; do
+    curl -4 -fsI --connect-timeout 8 "$mirror/dists/$codename/Release" >/dev/null 2>&1 || continue
+    if [[ "$source_file" == *.sources ]]; then
+      sudo sed -i -E "s#^URIs: .*#URIs: $mirror/#" "$source_file"
+    else
+      sudo sed -i -E "s#https?://[^ ]+/ubuntu/?#$mirror/#g" "$source_file"
+    fi
+    sudo rm -rf /var/lib/apt/lists/*
+    if sudo apt-get update -y; then
+      mirror_ready=true
+      break
+    fi
+  done
+fi
+"$mirror_ready" || { echo 'No configured Iranian Ubuntu mirror completed apt update.' >&2; exit 1; }
+
+sudo apt-get dist-upgrade -y
+sudo apt-get install -y ca-certificates curl openssl ufw fail2ban unattended-upgrades docker.io docker-compose-v2
+
+sudo install -d -m 0755 /etc/docker
+printf '%s\n' '{' '  "registry-mirrors": ["https://docker.arvancloud.ir"],' '  "live-restore": true,' '  "log-driver": "json-file",' '  "log-opts": {"max-size": "10m", "max-file": "3"}' '}' | sudo tee /etc/docker/daemon.json >/dev/null
+sudo systemctl enable --now docker
+sudo usermod -aG docker "$(id -un)"
+
+sudo ufw default deny incoming
+sudo ufw default allow outgoing
+sudo ufw limit 22/tcp comment 'SSH rate limited'
+sudo ufw allow 80/tcp comment 'HTTP redirect and ACME'
+sudo ufw allow 443/tcp comment 'Bourse Azma UI'
+sudo ufw --force enable
+
+sudo install -d -m 0755 /etc/fail2ban/jail.d
+printf '%s\n' '[sshd]' 'enabled = true' 'bantime = 1h' 'findtime = 10m' 'maxretry = 5' | sudo tee /etc/fail2ban/jail.d/bourse-azma.conf >/dev/null
+sudo systemctl enable --now fail2ban
+
+sudo install -d -m 0755 /etc/ssh/sshd_config.d
+printf '%s\n' 'PermitRootLogin no' 'MaxAuthTries 4' 'LoginGraceTime 30' 'X11Forwarding no' | sudo tee /etc/ssh/sshd_config.d/60-bourse-azma-hardening.conf >/dev/null
+sudo sshd -t
+sudo systemctl reload ssh
+
+sudo dpkg-reconfigure -f noninteractive unattended-upgrades >/dev/null 2>&1 || true
+if ! swapon --show | grep -q .; then
+  sudo fallocate -l 1G /swapfile
+  sudo chmod 600 /swapfile
+  sudo mkswap /swapfile >/dev/null
+  sudo swapon /swapfile
+  grep -q '^/swapfile ' /etc/fstab || printf '%s\n' '/swapfile none swap sw 0 0' | sudo tee -a /etc/fstab >/dev/null
+fi
+REMOTE_SCRIPT
+  then
+    err "Ubuntu provisioning failed; no application containers were started."
+    return 1
+  fi
+  ok "Host packages, Docker, firewall, fail2ban, updates, SSH policy and swap are ready."
 }
 
-# Copy TLS certs to a path readable by nginx-unprivileged (uid 101) inside the container.
-rd_sync_tls_certs() {
-  info "Syncing TLS certificates to /opt/bourse-azma-certs..."
-  rd_ssh "sudo mkdir -p /opt/bourse-azma-certs && \
-    sudo cp -L /etc/letsencrypt/live/$REMOTE_DOMAIN/fullchain.pem /opt/bourse-azma-certs/ && \
-    sudo cp -L /etc/letsencrypt/live/$REMOTE_DOMAIN/privkey.pem /opt/bourse-azma-certs/ && \
-    sudo chmod 644 /opt/bourse-azma-certs/*" \
-    || { err "Failed to sync TLS certificates."; return 1; }
-  ok "TLS certificates synced."
-}
-
-# One-time: Arvan mirror, Docker + compose plugin, postgres/redis pull.
-rd_provision_docker_base() {
-  if rd_ssh "test -f $REMOTE_DOCKER_MARKER" >/dev/null 2>&1; then
-    ok "Docker base already provisioned (mirror/docker/postgres/redis), skipping."
-    return 0
-  fi
-
-  info "First-time Docker setup: this may take a few minutes..."
-
-  info "Configuring ArvanCloud Docker registry mirror..."
-  rd_ssh "sudo mkdir -p /etc/docker && \
-    printf '{\n  \"registry-mirrors\": [\"$ARVAN_MIRROR_URL\"]\n}\n' | sudo tee /etc/docker/daemon.json >/dev/null" \
-    || { err "Failed to configure Docker mirror."; return 1; }
-
-  info "Installing Docker + docker compose plugin..."
-  rd_ssh "command -v docker >/dev/null 2>&1 || curl -fsSL https://get.docker.com | sudo sh" \
-    || { err "Docker installation failed."; return 1; }
-  rd_ssh "sudo usermod -aG docker \$(whoami) || true"
-  rd_ssh "sudo systemctl enable docker && sudo systemctl restart docker" \
-    || { err "Failed to restart Docker after mirror configuration."; return 1; }
-
-  info "Pulling postgres:14-alpine and redis:7-alpine (versions used by this platform)..."
-  rd_ssh "sudo docker pull postgres:14-alpine && sudo docker pull redis:7-alpine" \
-    || { err "Failed to pull base images."; return 1; }
-
-  rd_ssh "touch $REMOTE_DOCKER_MARKER"
-  ok "Docker base provisioning complete."
-}
-
-# One-time (or retry if missing): certbot + Let's Encrypt certificate.
-rd_provision_tls() {
-  info "Installing certbot (if needed)..."
-  rd_ssh "command -v certbot >/dev/null 2>&1 || (sudo apt-get update -y && sudo apt-get install -y certbot)" \
-    || { err "Failed to install certbot."; return 1; }
-
-  if rd_ssh "test -f /etc/letsencrypt/live/$REMOTE_DOMAIN/fullchain.pem" >/dev/null 2>&1; then
-    ok "TLS certificate already present for $REMOTE_DOMAIN, skipping certbot."
-    rd_sync_tls_certs || return 1
-    rd_install_cert_renewal_hook
-    return 0
-  fi
-
-  info "Opening firewall ports 80/443 (if ufw is active)..."
-  rd_ssh "sudo ufw allow 80/tcp >/dev/null 2>&1; sudo ufw allow 443/tcp >/dev/null 2>&1; true"
-
-  info "Requesting Let's Encrypt certificate for $REMOTE_DOMAIN..."
-  info "DNS A record for $REMOTE_DOMAIN must point to $REMOTE_HOST (port 80 must be free)."
-  if rd_ssh "sudo certbot certonly --standalone --non-interactive --agree-tos -m admin@$REMOTE_DOMAIN -d $REMOTE_DOMAIN"; then
-    ok "TLS certificate obtained for $REMOTE_DOMAIN."
-    rd_sync_tls_certs || return 1
-    rd_install_cert_renewal_hook
-    return 0
-  fi
-
-  err "Could not obtain TLS certificate automatically."
-  err "Make sure the DNS A record for $REMOTE_DOMAIN points to $REMOTE_HOST, then re-run remote-deploy."
+rd_pull_base_images() {
+  info "Pulling base images through the configured registry mirror..."
+  rd_ssh "bash -s" <<'REMOTE_SCRIPT' || {
+set -euo pipefail
+pull_and_tag() {
+  image="$1"
+  for registry in docker.arvancloud.ir docker.abrha.net; do
+    if sudo docker pull "$registry/library/$image"; then
+      sudo docker tag "$registry/library/$image" "$image"
+      return 0
+    fi
+  done
   return 1
 }
+pull_and_tag postgres:14-alpine
+pull_and_tag redis:7-alpine
+REMOTE_SCRIPT
+    err "Could not pull PostgreSQL/Redis images. Check the Iranian registry mirror."
+    return 1
+  }
+}
 
-rd_provision_server() {
-  rd_provision_docker_base || return 1
-  rd_provision_tls || return 1
+rd_provision_secrets() {
+  info "Creating persistent deployment secrets when missing..."
+  rd_ssh "APP_DIR='$REMOTE_APP_DIR' bash -s" <<'REMOTE_SCRIPT'
+set -euo pipefail
+secret_dir="$APP_DIR/bourse-azma-platform/compose/secrets"
+install -d -m 0700 "$secret_dir"
+create_secret() {
+  file="$1"
+  value="$2"
+  if [ ! -s "$secret_dir/$file" ]; then
+    umask 077
+    printf '%s' "$value" > "$secret_dir/$file"
+  fi
+}
+create_secret postgres_username "bourse_$(openssl rand -hex 8)"
+create_secret postgres_password "$(openssl rand -base64 48 | tr -d '\n=/+' | head -c 56)"
+create_secret bootstrap_admin_password "$(openssl rand -base64 24 | tr -dc 'A-Za-z0-9@#%_' | head -c 24)"
+sudo chown 10001:10001 "$secret_dir"/*
+sudo chmod 0400 "$secret_dir"/*
+REMOTE_SCRIPT
+  ok "Secrets are stable across redeploys and are not stored in compose or image metadata."
+}
+
+rd_install_cert_renewal_hooks() {
+  rd_ssh "APP_DIR='$REMOTE_APP_DIR' DOMAIN='$REMOTE_DOMAIN' bash -s" <<'REMOTE_SCRIPT'
+set -euo pipefail
+sudo install -d -m 0755 /etc/letsencrypt/renewal-hooks/pre /etc/letsencrypt/renewal-hooks/deploy
+printf '%s\n' '#!/bin/sh' 'docker stop bourse-azma-ui >/dev/null 2>&1 || true' | sudo tee /etc/letsencrypt/renewal-hooks/pre/stop-bourse-ui.sh >/dev/null
+sudo chmod 0755 /etc/letsencrypt/renewal-hooks/pre/stop-bourse-ui.sh
+sudo tee /etc/letsencrypt/renewal-hooks/deploy/reload-bourse-ui.sh >/dev/null <<EOF
+#!/bin/sh
+set -eu
+install -d -m 0755 /opt/bourse-azma-certs
+cp -L /etc/letsencrypt/live/$DOMAIN/fullchain.pem /opt/bourse-azma-certs/fullchain.pem
+cp -L /etc/letsencrypt/live/$DOMAIN/privkey.pem /opt/bourse-azma-certs/privkey.pem
+chmod 0644 /opt/bourse-azma-certs/fullchain.pem
+chown root:101 /opt/bourse-azma-certs/privkey.pem
+chmod 0640 /opt/bourse-azma-certs/privkey.pem
+cd $APP_DIR/bourse-azma-platform/compose
+docker compose up -d bourse-azma-ui
+EOF
+sudo chmod 0755 /etc/letsencrypt/renewal-hooks/deploy/reload-bourse-ui.sh
+REMOTE_SCRIPT
+}
+
+rd_sync_tls_certs() {
+  rd_ssh "DOMAIN='$REMOTE_DOMAIN' bash -s" <<'REMOTE_SCRIPT'
+set -euo pipefail
+sudo install -d -m 0755 /opt/bourse-azma-certs
+sudo cp -L "/etc/letsencrypt/live/$DOMAIN/fullchain.pem" /opt/bourse-azma-certs/fullchain.pem
+sudo cp -L "/etc/letsencrypt/live/$DOMAIN/privkey.pem" /opt/bourse-azma-certs/privkey.pem
+sudo chmod 0644 /opt/bourse-azma-certs/fullchain.pem
+sudo chown root:101 /opt/bourse-azma-certs/privkey.pem
+sudo chmod 0640 /opt/bourse-azma-certs/privkey.pem
+REMOTE_SCRIPT
+}
+
+rd_provision_tls() {
+  info "Provisioning a Let's Encrypt certificate for $REMOTE_DOMAIN..."
+  rd_ssh "sudo apt-get install -y certbot" || return 1
+  if ! rd_ssh "sudo test -s /etc/letsencrypt/live/$REMOTE_DOMAIN/fullchain.pem"; then
+    rd_ssh "sudo docker stop bourse-azma-ui >/dev/null 2>&1 || true; sudo certbot certonly --standalone --preferred-challenges http --non-interactive --agree-tos -m admin@$REMOTE_DOMAIN -d $REMOTE_DOMAIN" || {
+      rd_ssh "sudo docker start bourse-azma-ui >/dev/null 2>&1 || true"
+      err "Let's Encrypt failed. Confirm that $REMOTE_DOMAIN resolves to $REMOTE_HOST and ports 80/443 reach this host."
+      return 1
+    }
+  fi
+  rd_sync_tls_certs
+  rd_install_cert_renewal_hooks
 }
 
 rd_remote_platform() {
-  local remote_arch
-  remote_arch="$(rd_ssh "uname -m" 2>/dev/null | tr -d '[:space:]')"
-  case "$remote_arch" in
-    aarch64|arm64) echo "linux/arm64" ;;
-    *) echo "linux/amd64" ;;
+  case "$(rd_ssh "uname -m" 2>/dev/null | tr -d '[:space:]')" in
+    aarch64|arm64) echo linux/arm64 ;;
+    *) echo linux/amd64 ;;
   esac
 }
 
 rd_build_images() {
-  local platform os entry name context dockerfile
+  local platform entry name context dockerfile build_arg
   cleanup_workspace_appledouble
-  os="$(uname -s)"
   platform="$(rd_remote_platform)"
-
-  info "Building images locally for platform $platform..."
-
-  if [[ "$os" == "Darwin" ]]; then
-    docker buildx inspect bourse-azma-remote >/dev/null 2>&1 || \
-      docker buildx create --name bourse-azma-remote --use >/dev/null
-    docker buildx use bourse-azma-remote >/dev/null
-  fi
-
+  info "Building the optimized project Dockerfiles locally for $platform..."
   for entry in "${REMOTE_IMAGES[@]}"; do
     IFS='|' read -r name context dockerfile build_arg <<< "$entry"
     info "Building $name..."
-    if [[ "$os" == "Darwin" ]]; then
-      if [[ -n "${build_arg:-}" ]]; then
-        docker buildx build \
-          --platform "$platform" \
-          --build-arg "$build_arg" \
-          -t "$name:latest" \
-          -f "$context/$dockerfile" \
-          --load \
-          "$context" || { err "Build failed: $name"; return 1; }
-      else
-        docker buildx build \
-          --platform "$platform" \
-          -t "$name:latest" \
-          -f "$context/$dockerfile" \
-          --load \
-          "$context" || { err "Build failed: $name"; return 1; }
-      fi
-    else
-      if [[ -n "${build_arg:-}" ]]; then
-        docker build \
-          --build-arg "$build_arg" \
-          -t "$name:latest" \
-          -f "$context/$dockerfile" \
-          "$context" || { err "Build failed: $name"; return 1; }
-      else
-        docker build \
-          -t "$name:latest" \
-          -f "$context/$dockerfile" \
-          "$context" || { err "Build failed: $name"; return 1; }
-      fi
-    fi
-    ok "$name built."
+    local args=(-t "$name:latest" -f "$context/$dockerfile")
+    [[ -z "${build_arg:-}" ]] || args+=(--build-arg "$build_arg")
+    docker build --platform "$platform" "${args[@]}" "$context" || return 1
   done
 }
 
 rd_ship_images() {
-  local entry name tmpfile
-  rd_ssh "mkdir -p $REMOTE_APP_DIR/images" || return 1
-
+  local entry name archive checksum previous_checksum
+  rd_ssh "mkdir -p '$REMOTE_APP_DIR/images'" || return 1
   for entry in "${REMOTE_IMAGES[@]}"; do
-    IFS='|' read -r name _ _ <<< "$entry"
-    tmpfile="$(mktemp -t "${name}-XXXXXX").tar.gz"
-
-    info "Saving $name image..."
-    docker save "$name:latest" | gzip > "$tmpfile" || { err "docker save failed for $name"; return 1; }
-
-    info "Copying $name to $REMOTE_HOST..."
-    rd_scp "$tmpfile" "$REMOTE_USER@$REMOTE_HOST:$REMOTE_APP_DIR/images/$name.tar.gz" \
-      || { err "scp failed for $name"; rm -f "$tmpfile"; return 1; }
-    rm -f "$tmpfile"
-
-    info "Loading $name image on remote server..."
-    rd_ssh "gunzip -c $REMOTE_APP_DIR/images/$name.tar.gz | sudo docker load && rm -f $REMOTE_APP_DIR/images/$name.tar.gz" \
-      || { err "docker load failed for $name"; return 1; }
-    ok "$name deployed to remote server."
+    IFS='|' read -r name _ _ _ <<< "$entry"
+    archive="$(mktemp -t "${name}-XXXXXX").tar.gz"
+    docker save "$name:latest" | gzip -1 > "$archive" || { rm -f "$archive"; return 1; }
+    checksum="$(shasum -a 256 "$archive" | awk '{print $1}')"
+    previous_checksum="$(rd_ssh "cat '$REMOTE_APP_DIR/images/$name.sha256' 2>/dev/null || true")"
+    if [[ "$checksum" == "$previous_checksum" ]]; then
+      ok "$name is unchanged; image upload skipped."
+      rm -f "$archive"
+      continue
+    fi
+    info "Uploading optimized $name image..."
+    rd_scp "$archive" "$REMOTE_USER@$REMOTE_HOST:$REMOTE_APP_DIR/images/$name.tar.gz" || { rm -f "$archive"; return 1; }
+    rm -f "$archive"
+    rd_ssh "if sudo docker image inspect '$name:latest' >/dev/null 2>&1; then sudo docker tag '$name:latest' '$name:rollback'; fi; gunzip -c '$REMOTE_APP_DIR/images/$name.tar.gz' | sudo docker load; printf '%s' '$checksum' > '$REMOTE_APP_DIR/images/$name.sha256'; rm -f '$REMOTE_APP_DIR/images/$name.tar.gz'" || return 1
   done
 }
 
-rd_pick_compose_profile() {
-  echo "remote"
+rd_sync_deploy_files() {
+  local profile_env="$PLATFORM_ROOT/compose/profiles/remote.env"
+  info "Synchronizing production compose configuration atomically..."
+  rd_ssh "mkdir -p '$REMOTE_APP_DIR/bourse-azma-platform/compose' '$REMOTE_APP_DIR/bourse-azma-ui'"
+  rd_scp "$PLATFORM_ROOT/compose/docker-compose.remote.yml" "$REMOTE_USER@$REMOTE_HOST:$REMOTE_APP_DIR/bourse-azma-platform/compose/docker-compose.yml.new" || return 1
+  rd_scp "$profile_env" "$REMOTE_USER@$REMOTE_HOST:$REMOTE_APP_DIR/bourse-azma-platform/compose/.env.new" || return 1
+  if [[ -f "$WORKSPACE_DIR/bourse-azma-ui/.env" ]]; then
+    rd_scp "$WORKSPACE_DIR/bourse-azma-ui/.env" "$REMOTE_USER@$REMOTE_HOST:$REMOTE_APP_DIR/bourse-azma-ui/.env.new" || return 1
+  else
+    : > /dev/null
+    rd_ssh "touch '$REMOTE_APP_DIR/bourse-azma-ui/.env.new'"
+  fi
+  rd_ssh "mv '$REMOTE_APP_DIR/bourse-azma-platform/compose/docker-compose.yml.new' '$REMOTE_APP_DIR/bourse-azma-platform/compose/docker-compose.yml'; mv '$REMOTE_APP_DIR/bourse-azma-platform/compose/.env.new' '$REMOTE_APP_DIR/bourse-azma-platform/compose/.env'; mv '$REMOTE_APP_DIR/bourse-azma-ui/.env.new' '$REMOTE_APP_DIR/bourse-azma-ui/.env'; chmod 0600 '$REMOTE_APP_DIR/bourse-azma-platform/compose/.env' '$REMOTE_APP_DIR/bourse-azma-ui/.env'"
 }
 
-rd_sync_deploy_files() {
-  local profile profile_env
-  profile="$(rd_pick_compose_profile)"
-  profile_env="$PLATFORM_ROOT/compose/profiles/${profile}.env"
-  info "Using resource profile '$profile' for remote server."
+rd_rollback() {
+  warn "Rolling application images back to the previous deployed versions..."
+  rd_ssh "cd '$REMOTE_APP_DIR/bourse-azma-platform/compose'; for image in tsetmc-api codal-api bourse-azma-api bourse-azma-ui; do if sudo docker image inspect \"\$image:rollback\" >/dev/null 2>&1; then sudo docker tag \"\$image:rollback\" \"\$image:latest\"; fi; done; sudo docker compose up -d --force-recreate" || true
+}
 
-  info "Syncing compose and nginx configuration to remote server..."
-  rd_ssh "mkdir -p $REMOTE_APP_DIR/bourse-azma-platform/compose $REMOTE_APP_DIR/bourse-azma-ui" || return 1
+rd_verify_remote_stack() {
+  local deadline=$((SECONDS + REMOTE_HEALTH_TIMEOUT)) status
+  info "Waiting for every container to become healthy..."
+  while (( SECONDS < deadline )); do
+    status="$(rd_ssh "cd '$REMOTE_APP_DIR/bourse-azma-platform/compose' && sudo docker compose ps --format json" 2>/dev/null || true)"
+    if [[ "$(printf '%s\n' "$status" | grep -c '"Health":"healthy"' || true)" -ge 6 ]]; then
+      break
+    fi
+    if printf '%s' "$status" | grep -Eq '"State":"(exited|dead)"|"Health":"unhealthy"'; then
+      break
+    fi
+    sleep 5
+  done
 
-  rd_scp "$PLATFORM_ROOT/compose/docker-compose.remote.yml" \
-    "$REMOTE_USER@$REMOTE_HOST:$REMOTE_APP_DIR/bourse-azma-platform/compose/docker-compose.yml" \
-    || { err "Failed to copy compose file."; return 1; }
-
-  if [[ -f "$profile_env" ]]; then
-    rd_scp "$profile_env" \
-      "$REMOTE_USER@$REMOTE_HOST:$REMOTE_APP_DIR/bourse-azma-platform/compose/.env" \
-      || { err "Failed to copy compose .env."; return 1; }
+  status="$(rd_ssh "cd '$REMOTE_APP_DIR/bourse-azma-platform/compose' && sudo docker compose ps --format json" 2>/dev/null || true)"
+  if [[ "$(printf '%s\n' "$status" | grep -c '"Health":"healthy"' || true)" -lt 6 ]]; then
+    err "The stack did not become healthy."
+    rd_ssh "cd '$REMOTE_APP_DIR/bourse-azma-platform/compose' && sudo docker compose ps && sudo docker compose logs --tail=120" || true
+    return 1
   fi
 
-  if [[ -f "$WORKSPACE_DIR/bourse-azma-ui/.env" ]]; then
-    rd_scp "$WORKSPACE_DIR/bourse-azma-ui/.env" \
-      "$REMOTE_USER@$REMOTE_HOST:$REMOTE_APP_DIR/bourse-azma-ui/.env" \
-      || { err "Failed to copy .env file."; return 1; }
-  else
-    warn "bourse-azma-ui/.env not found locally; creating an empty one on remote."
-    rd_ssh "touch $REMOTE_APP_DIR/bourse-azma-ui/.env"
-  fi
-
-  ok "Configuration synced."
+  rd_ssh "curl -kfsS --resolve '$REMOTE_DOMAIN:443:127.0.0.1' 'https://$REMOTE_DOMAIN/healthz' | grep -qx ok" || return 1
+  rd_ssh "sudo ss -lntH | awk '{print \$4}' | grep -Eq ':(5432|6379|9000|9002|9003)$' && exit 1 || exit 0" || {
+    err "A backend port is unexpectedly listening on the host."
+    return 1
+  }
+  ok "All six containers are healthy; HTTPS works; backend ports are private."
 }
 
 rd_start_remote_stack() {
-  info "Starting stack on remote server..."
-  rd_ssh "cd $REMOTE_APP_DIR/bourse-azma-platform/compose && sudo docker compose up -d" \
-    || { err "Failed to start remote stack."; return 1; }
-  ok "Remote stack is up."
+  info "Validating and starting the remote stack..."
+  rd_ssh "cd '$REMOTE_APP_DIR/bourse-azma-platform/compose' && sudo docker compose config --quiet && sudo docker compose up -d --remove-orphans" || return 1
+  rd_verify_remote_stack
 }
 
 platform_remote_deploy() {
   rd_ensure_sshpass || return 1
   rd_prompt_credentials || return 1
   rd_check_connectivity || return 1
-  rd_provision_server || return 1
+  rd_provision_os || return 1
+  rd_pull_base_images || return 1
+  rd_provision_secrets || return 1
+  rd_provision_tls || return 1
   rd_build_images || return 1
   rd_ship_images || return 1
   rd_sync_deploy_files || return 1
-  rd_sync_tls_certs || return 1
-  rd_start_remote_stack || return 1
+  if ! rd_start_remote_stack; then
+    rd_rollback
+    return 1
+  fi
 
   echo
-  ok "Remote deploy complete!"
-  info "Frontend: https://$REMOTE_DOMAIN (host port 443 -> container 8080)"
-  info "Backend services (db, redis, tsetmc-api, codal-api, bourse-azma-api) are only reachable from within the server's Docker network."
+  ok "Remote deploy and verification complete."
+  info "UI: https://$REMOTE_DOMAIN (only host ports 22, 80 and 443 are allowed)."
+  info "Database, Redis and API containers have no host port bindings."
+  info "Initial admin password is stored at: $REMOTE_APP_DIR/bourse-azma-platform/compose/secrets/bootstrap_admin_password"
 }

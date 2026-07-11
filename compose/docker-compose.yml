@@ -199,7 +199,6 @@ services:
       SPRING_DATASOURCE_PASSWORD: 12345
       SPRING_DATA_REDIS_HOST: redis
       SPRING_DATA_REDIS_PORT: 6379
-      APP_SECURITY_JWT_SECRET: bourse-azma-jwt-secret-key-with-at-least-32-bytes
       APP_MARKET_SEARCH_CSV_PATH: /app/market.csv
       APP_TSETMC_BASE_URL: http://tsetmc-api:9000/tsetmc
       APP_ORDER_MATCHING_ENABLED: "true"

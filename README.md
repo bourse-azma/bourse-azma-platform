@@ -78,15 +78,14 @@ docker compose down
 
 ## Security Note (JWT Secret)
 
-In `compose/docker-compose.yml`, the value of `APP_SECURITY_JWT_SECRET` is only a sample value for local development.
+The JWT signing secret is now generated randomly and securely **in code** at application startup
+(see `JwtTokenService`).
 
-For better security, change it before running in any shared/staging/production environment.
+No `APP_SECURITY_JWT_SECRET` (or `app.security.jwt.secret`) configuration is required or used.
+A fresh strong key (512-bit) is created on every start using `SecureRandom`. This means
+active access tokens are invalidated on restart (acceptable given the token lifetime).
 
-Suggested strong example (replace with your own):
-
-```env
-APP_SECURITY_JWT_SECRET=Qp7mN2vL9xRt4Ks8wZc1Ha6uJd3Fy0BnEe5Tg4Ui7Yo2
-```
+Cookie security (`Secure` flag) is hardcoded to `true` and no longer read from configuration.
 
 ## UI Env File (for Docker Compose)
 
