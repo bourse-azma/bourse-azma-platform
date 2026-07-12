@@ -4,6 +4,7 @@
 REMOTE_DOMAIN="${REMOTE_DOMAIN:-bourseazma.ir}"
 REMOTE_APP_DIR="${REMOTE_APP_DIR:-}"
 REMOTE_HEALTH_TIMEOUT="${REMOTE_HEALTH_TIMEOUT:-360}"
+REMOTE_ADMIN_USERNAME="${REMOTE_ADMIN_USERNAME:-erfan}"
 ARVAN_DOCKER_MIRROR="${ARVAN_DOCKER_MIRROR:-https://docker.arvancloud.ir}"
 ARVAN_UBUNTU_MIRROR="${ARVAN_UBUNTU_MIRROR:-https://mirror.arvancloud.ir/ubuntu}"
 
@@ -356,6 +357,19 @@ rd_start_remote_stack() {
   rd_verify_remote_stack
 }
 
+rd_show_admin_credentials() {
+  local admin_password
+  admin_password="$(rd_ssh "sudo cat '$REMOTE_APP_DIR/bourse-azma-platform/compose/secrets/bootstrap_admin_password'" 2>/dev/null)" || {
+    warn "Deploy succeeded, but the admin password could not be read from the server."
+    return 0
+  }
+
+  echo
+  title "Admin credentials"
+  info "Username: $REMOTE_ADMIN_USERNAME"
+  info "Password: $admin_password"
+}
+
 platform_remote_deploy() {
   rd_ensure_sshpass || return 1
   rd_prompt_credentials || return 1
@@ -376,5 +390,5 @@ platform_remote_deploy() {
   ok "Remote deploy and verification complete."
   info "UI: https://$REMOTE_DOMAIN (only host ports 22, 80 and 443 are allowed)."
   info "Database, Redis and API containers have no host port bindings."
-  info "Initial admin password is stored at: $REMOTE_APP_DIR/bourse-azma-platform/compose/secrets/bootstrap_admin_password"
+  rd_show_admin_credentials
 }
