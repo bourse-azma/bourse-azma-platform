@@ -73,9 +73,9 @@ Commands:
   logs               View service logs
   update             Git pull all workspace repositories
   deploy             Update repos and restart services
-  remote-deploy      Build images locally and deploy them to a remote server
-                     over SSH (first run also provisions the server: Docker,
-                     ArvanCloud mirror, postgres/redis, Let's Encrypt TLS)
+  remote-deploy      Upload source and build/deploy images on the remote server
+                     over SSH (first run also provisions Docker, mirrors,
+                     firewall, postgres/redis and Let's Encrypt TLS)
   menu               Interactive menu (default when no command is given)
 
 Options:

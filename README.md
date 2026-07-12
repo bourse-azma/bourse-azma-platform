@@ -69,6 +69,15 @@ To deliberately repeat bootstrap after changing host provisioning:
 REMOTE_FORCE_BOOTSTRAP=1 ./platform.sh remote-deploy
 ```
 
+Interactive menu option `7` opens remote operations:
+
+- **Deploy / Release** uploads source, builds on the server, and deploys the stack.
+- **Edit configuration** edits the persistent production configuration for the
+  UI, Bourse Azma API, Codal API, or TSETMC API. Backend changes recreate only
+  the selected container. UI changes rebuild only the UI image (Vite variables
+  are compile-time settings) and then recreate its container. Each operation
+  waits for the affected service to become healthy.
+
 ## Manual Compose Usage
 
 ```bash

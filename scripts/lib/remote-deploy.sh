@@ -48,6 +48,10 @@ rd_ssh() {
   SSHPASS="$REMOTE_PASSWORD" sshpass -e ssh "${remote_ssh_opts[@]}" "$REMOTE_USER@$REMOTE_HOST" "$@"
 }
 
+rd_ssh_tty() {
+  SSHPASS="$REMOTE_PASSWORD" sshpass -e ssh -tt "${remote_ssh_opts[@]}" "$REMOTE_USER@$REMOTE_HOST" "$@"
+}
+
 rd_scp() {
   SSHPASS="$REMOTE_PASSWORD" sshpass -e scp "${remote_ssh_opts[@]}" "$@"
 }
@@ -255,7 +259,45 @@ rd_sync_source() {
     return 1
   }
   rm -f "$archive"
-  rd_ssh "rm -rf '$REMOTE_APP_DIR/source'; mkdir -p '$REMOTE_APP_DIR/source'; tar -xzf '$REMOTE_APP_DIR/source.tar.gz' -C '$REMOTE_APP_DIR/source'; rm -f '$REMOTE_APP_DIR/source.tar.gz'"
+  rd_ssh "APP_DIR='$REMOTE_APP_DIR' bash -s" <<'REMOTE_SCRIPT'
+set -euo pipefail
+rm -rf "$APP_DIR/source"
+mkdir -p "$APP_DIR/source"
+tar -xzf "$APP_DIR/source.tar.gz" -C "$APP_DIR/source"
+rm -f "$APP_DIR/source.tar.gz"
+
+config_dir="$APP_DIR/bourse-azma-platform/compose/config"
+mkdir -p "$config_dir"
+touch "$config_dir/tsetmc-api.env" "$config_dir/codal-api.env" "$config_dir/bourse-azma-api.env"
+chmod 0600 "$config_dir"/*.env
+
+# Production UI configuration is server-owned after the first deployment.
+# Seed it from the uploaded source once, then preserve remote edits forever.
+if [ -s "$config_dir/bourse-azma-ui.env" ]; then
+  cp "$config_dir/bourse-azma-ui.env" "$APP_DIR/source/bourse-azma-ui/.env"
+elif [ -f "$APP_DIR/source/bourse-azma-ui/.env" ]; then
+  cp "$APP_DIR/source/bourse-azma-ui/.env" "$config_dir/bourse-azma-ui.env"
+  chmod 0600 "$config_dir/bourse-azma-ui.env"
+else
+  touch "$config_dir/bourse-azma-ui.env" "$APP_DIR/source/bourse-azma-ui/.env"
+  chmod 0600 "$config_dir/bourse-azma-ui.env"
+fi
+
+# The source Dockerfiles keep BuildKit cache mounts for fast local builds.
+# Produce server-only variants that work with the classic Linux builder.
+for service in tsetmc-api codal-api fipiran-api bourse-azma-api bourse-azma-ui; do
+  awk '
+    $1 == "RUN" && $2 ~ /^--mount=type=cache,target=\/root\/\.(m2|npm)$/ {
+      if (getline command) {
+        sub(/^[[:space:]]+/, "", command)
+        print "RUN " command
+      }
+      next
+    }
+    { print }
+  ' "$APP_DIR/source/$service/Dockerfile" > "$APP_DIR/source/$service/Dockerfile.server"
+done
+REMOTE_SCRIPT
 }
 
 rd_build_images_remote() {
@@ -267,11 +309,11 @@ for image in tsetmc-api codal-api fipiran-api bourse-azma-api bourse-azma-ui; do
     sudo docker tag "$image:latest" "$image:rollback"
   fi
 done
-sudo docker build -t tsetmc-api:latest -f "$SRC/tsetmc-api/Dockerfile" "$SRC/tsetmc-api"
-sudo docker build -t codal-api:latest -f "$SRC/codal-api/Dockerfile" "$SRC/codal-api"
-sudo docker build -t fipiran-api:latest -f "$SRC/fipiran-api/Dockerfile" "$SRC/fipiran-api"
-sudo docker build -t bourse-azma-api:latest -f "$SRC/bourse-azma-api/Dockerfile" "$SRC"
-sudo docker build --build-arg NGINX_CONF=nginx.remote.conf -t bourse-azma-ui:latest -f "$SRC/bourse-azma-ui/Dockerfile" "$SRC/bourse-azma-ui"
+sudo docker build -t tsetmc-api:latest -f "$SRC/tsetmc-api/Dockerfile.server" "$SRC/tsetmc-api"
+sudo docker build -t codal-api:latest -f "$SRC/codal-api/Dockerfile.server" "$SRC/codal-api"
+sudo docker build -t fipiran-api:latest -f "$SRC/fipiran-api/Dockerfile.server" "$SRC/fipiran-api"
+sudo docker build -t bourse-azma-api:latest -f "$SRC/bourse-azma-api/Dockerfile.server" "$SRC"
+sudo docker build --build-arg NGINX_CONF=nginx.remote.conf -t bourse-azma-ui:latest -f "$SRC/bourse-azma-ui/Dockerfile.server" "$SRC/bourse-azma-ui"
 REMOTE_SCRIPT
 }
 
@@ -461,6 +503,81 @@ rd_show_admin_credentials() {
   title "Admin credentials"
   info "Username: $REMOTE_ADMIN_USERNAME"
   info "Password: $admin_password"
+}
+
+rd_wait_for_service_health() {
+  local service="$1"
+  local deadline=$((SECONDS + REMOTE_HEALTH_TIMEOUT)) health
+  while (( SECONDS < deadline )); do
+    health="$(rd_ssh "sudo docker inspect --format '{{if .State.Health}}{{.State.Health.Status}}{{else}}{{.State.Status}}{{end}}' '$service' 2>/dev/null || true")"
+    [[ "$health" == "healthy" || "$health" == "running" ]] && return 0
+    [[ "$health" == "unhealthy" || "$health" == "exited" || "$health" == "dead" ]] && break
+    sleep 3
+  done
+  err "$service did not become healthy."
+  rd_ssh "sudo docker logs --tail=100 '$service'" || true
+  return 1
+}
+
+rd_edit_remote_config() {
+  local config_name="$1"
+  local service="$2"
+  local config_file="$REMOTE_APP_DIR/bourse-azma-platform/compose/config/$config_name.env"
+  local compose_dir="$REMOTE_APP_DIR/bourse-azma-platform/compose"
+  local before after
+
+  before="$(rd_ssh "sudo sha256sum '$config_file' 2>/dev/null | awk '{print \$1}' || true")"
+  info "Opening $config_name production configuration on $REMOTE_HOST..."
+  info "Save and exit the editor to apply it; exit without changes to cancel."
+  rd_ssh_tty "mkdir -p '$compose_dir/config'; touch '$config_file'; chmod 0600 '$config_file'; ${EDITOR:-nano} '$config_file'" || return 1
+  after="$(rd_ssh "sudo sha256sum '$config_file' 2>/dev/null | awk '{print \$1}' || true")"
+
+  if [[ -n "$before" && "$before" == "$after" ]]; then
+    warn "Configuration was not changed; no container was restarted."
+    return 0
+  fi
+
+  if [[ "$config_name" == "bourse-azma-ui" ]]; then
+    info "UI configuration changed; rebuilding only the UI image on the server..."
+    rd_ssh "cp '$config_file' '$REMOTE_APP_DIR/source/bourse-azma-ui/.env'; sudo docker build --build-arg NGINX_CONF=nginx.remote.conf -t bourse-azma-ui:latest -f '$REMOTE_APP_DIR/source/bourse-azma-ui/Dockerfile.server' '$REMOTE_APP_DIR/source/bourse-azma-ui'" || return 1
+  fi
+
+  info "Recreating $service so it reads the updated configuration..."
+  rd_ssh "cd '$compose_dir' && sudo docker compose up -d --no-deps --force-recreate '$service'" || return 1
+  rd_wait_for_service_health "$service" || return 1
+  ok "$config_name configuration applied; $service is healthy."
+}
+
+platform_remote_config() {
+  local choice config_name service
+  rd_ensure_sshpass || return 1
+  rd_prompt_credentials || return 1
+  rd_check_connectivity || return 1
+  rd_ssh "test -f '$REMOTE_APP_DIR/.bootstrap-complete'" || {
+    err "The server has not been deployed yet. Run Deploy / Release first."
+    return 1
+  }
+
+  cat <<MENU
+
+${C_BOLD}${C_CYAN}===== Edit Remote Configuration =====${C_RESET}
+1) Bourse Azma UI
+2) Bourse Azma API
+3) Codal API
+4) TSETMC API
+5) Back
+MENU
+  read -r -p "Choose a configuration [1-5]: " choice || return 1
+  choice="$(normalize_digits "$choice")"
+  case "$choice" in
+    1) config_name="bourse-azma-ui"; service="bourse-azma-ui" ;;
+    2) config_name="bourse-azma-api"; service="bourse-azma-api" ;;
+    3) config_name="codal-api"; service="codal-api" ;;
+    4) config_name="tsetmc-api"; service="tsetmc-api" ;;
+    5|"") return 0 ;;
+    *) err "Invalid selection. Choose 1-5."; return 1 ;;
+  esac
+  rd_edit_remote_config "$config_name" "$service"
 }
 
 platform_remote_deploy() {

@@ -26,9 +26,9 @@ x-java-runtime: &java-runtime
 # Remote/production compose file.
 #
 # Differences vs. compose/docker-compose.yml:
-#  - No `build:` sections. Images are pre-built locally, saved with
-#    `docker save`, copied to the server and loaded with `docker load`.
-#    Image names/tags below MUST match what remote-deploy.sh builds and loads.
+#  - No `build:` sections. The deployment script uploads a compact source
+#    bundle and builds the images directly on the server before Compose starts.
+#    Image names/tags below MUST match what remote-deploy.sh builds.
 #  - Only bourse-azma-ui is published to the host, on 443 -> 8080 (TLS
 #    terminated by nginx inside the container using a Let's Encrypt cert
 #    mounted from the host). All other services (db, redis, tsetmc-api,
@@ -116,7 +116,7 @@ services:
     image: tsetmc-api:latest
     container_name: tsetmc-api
     env_file:
-      - ../../bourse-azma-ui/.env
+      - ./config/tsetmc-api.env
     environment:
       <<: *java-runtime
       SPRING_DATA_REDIS_HOST: redis
@@ -150,7 +150,7 @@ services:
     image: codal-api:latest
     container_name: codal-api
     env_file:
-      - ../../bourse-azma-ui/.env
+      - ./config/codal-api.env
     environment:
       <<: *java-runtime
       SPRING_DATA_REDIS_HOST: redis
@@ -186,7 +186,7 @@ services:
     image: bourse-azma-api:latest
     container_name: bourse-azma-api
     env_file:
-      - ../../bourse-azma-ui/.env
+      - ./config/bourse-azma-api.env
     environment:
       <<: *java-runtime
       SERVER_PORT: 9003

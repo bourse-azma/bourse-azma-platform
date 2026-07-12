@@ -216,6 +216,25 @@ menu_show_logs() {
   platform_logs
 }
 
+menu_remote_operations() {
+  local choice
+  cat <<MENU
+
+${C_BOLD}${C_CYAN}===== Remote Operations =====${C_RESET}
+1) Deploy / Release
+2) Edit configuration
+3) Back
+MENU
+  read -r -p "Choose an option [1-3]: " choice || return 1
+  choice="$(normalize_digits "$choice")"
+  case "$choice" in
+    1) platform_remote_deploy ;;
+    2) platform_remote_config ;;
+    3|"") return 0 ;;
+    *) err "Invalid selection. Choose 1-3."; return 1 ;;
+  esac
+}
+
 print_menu() {
   cat <<MENU
 
@@ -226,7 +245,7 @@ ${C_BOLD}${C_CYAN}===== Bourse Azma Platform =====${C_RESET}
 4) Git update
 5) Status
 6) Logs
-7) Remote deploy
+7) Remote operations
 8) Exit
 MENU
 }
@@ -249,7 +268,7 @@ platform_menu() {
       4) run_menu_action platform_update ;;
       5) run_menu_action platform_status ;;
       6) run_menu_action menu_show_logs ;;
-      7) run_menu_action platform_remote_deploy ;;
+      7) run_menu_action menu_remote_operations ;;
       8)
         info "Exiting."
         exit 0
