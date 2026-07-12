@@ -189,6 +189,8 @@ services:
     container_name: bourse-azma-api
     ports:
       - "9003:9003"
+    env_file:
+      - ../../bourse-azma-ui/.env
     environment:
       <<: *java-runtime
       SERVER_PORT: 9003
