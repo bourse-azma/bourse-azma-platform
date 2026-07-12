@@ -5,29 +5,33 @@ capped under 2 GB** and **idle RSS target of 300–500 MB**.
 
 ## Measured Results (ultra profile, validated)
 
-| Metric                            | Result                                                        |
-|-----------------------------------|---------------------------------------------------------------|
-| Idle RSS (all 6 containers)       | **~489–560 MiB**                                              |
-| Container memory limits (total)   | **728 MiB**                                                   |
-| Sequential build peak             | **< 2 GB** (one Maven/Node build at a time, 384/256 MB heaps) |
-| Startup peak (staggered JVM boot) | **< 700 MiB** (one Java service at a time)                    |
-| Load test (50 req, c=5 on UI)     | **0 failures**, ~5,300 req/s                                  |
-| Main API startup time             | ~70–90 s                                                      |
+| Metric                            | Result                                                         |
+|-----------------------------------|----------------------------------------------------------------|
+| Idle RSS (all 6 containers)       | **~489–560 MiB**                                               |
+| Container memory limits (total)   | **728 MiB**                                                    |
+| Sequential build peak             | **< 2 GB** (one Maven/Node build at a time, 384/256 MB heaps)  |
+| Startup peak (staggered JVM boot) | **< 700 MiB** (one Java service at a time)                     |
+| Load test (50 req, c=5 on UI)     | **0 failures**, ~5,300 req/s                                   |
+| Full low-profile startup          | **~23 s** to all services healthy (measured on Docker Desktop) |
+| No-change second start            | **~1.7 s** (unchanged image builds are skipped)                |
 
 ---
 
 ## Resource Profiles
 
-Three profiles in `compose/profiles/` are applied by `scripts/configure-resources.sh` (auto-detects **RAM + CPU cores
+Four adaptive profiles in `compose/profiles/` are applied by `scripts/configure-resources.sh` (auto-detects **RAM + CPU
+cores
 **):
 
-| Profile      | Auto-selection rule                            | Limit total | Idle target | Use case               |
-|--------------|------------------------------------------------|-------------|-------------|------------------------|
-| **ultra**    | ≤ 1.2 GB RAM                                   | ~728 MB     | 400–560 MB  | 1 vCPU / 1 GB VPS      |
-| **low**      | ≤ 2.5 GB RAM, **or** ≤ 2 cores with ≤ 4 GB RAM | ~768 MB     | 450–600 MB  | Small cloud instances  |
-| **standard** | 2.5 GB+ RAM (including 8 GB+ dev machines)     | ~1.1 GB     | 600–900 MB  | Dev/prod with headroom |
+| Profile         | Auto-selection rule                            | Limit total | Idle target        | Use case              |
+|-----------------|------------------------------------------------|-------------|--------------------|-----------------------|
+| **ultra**       | ≤ 1.2 GB RAM                                   | ~728 MB     | 400–560 MB         | 1 vCPU / 1 GB VPS     |
+| **low**         | ≤ 2.5 GB RAM, **or** ≤ 2 cores with ≤ 4 GB RAM | 1,168 MB    | 650–850 MB         | 2-core / 2 GB hosts   |
+| **standard**    | Mid-sized hosts below a performance threshold  | ~1.1 GB     | 600–900 MB         | Medium dev/prod hosts |
+| **performance** | ≥ 8 GB RAM and ≥ 4 CPU cores                   | 2,752 MB    | workload-dependent | High-throughput hosts |
 
-There is **no separate high profile** — hosts with 8 GB+ RAM use **standard**, which already provides enough headroom.
+The performance profile expands JVM heaps, connection pools, PostgreSQL/Redis caches and CPU burst limits. It is
+selected only when the host has both enough memory and enough CPU; smaller machines retain strict hard limits.
 
 `platform.sh start` and `platform.sh restart` run `configure-resources.sh --auto`, which applies the recommended profile
 when `.env` is missing, stale, or too aggressive for the host (e.g. ultra on a 16 GB machine). To pin a profile
@@ -70,17 +74,17 @@ The stack requires separate `tsetmc-api`, `codal-api`, and `bourse-azma-api` con
 JVMs is only achievable with aggressive tuning**, not by magic. Key techniques:
 
 1. **Fixed small heaps** (`-Xmx64m` / `-Xmx120m`) instead of percentage-based sizing
-2. **SerialGC + C1-only JIT** (`-XX:TieredStopAtLevel=1`) — lower native/JIT memory
-3. **Lazy Spring initialization** — beans load on first request
-4. **Staggered container startup** — `tsetmc → codal → bourse-azma-api` to cap startup peak
-5. **Sequential Docker builds** — never build all images in parallel
+2. **G1 + full tiered JIT** on 2 GB+ hosts; SerialGC/C1 is reserved for the emergency 1 GB profile
+3. **Eager Spring initialization** on 2 GB+ profiles — startup work is paid once, not on user requests
+4. **Parallel independent startup** — UI, PostgreSQL and Redis start together; proxy APIs start together after Redis
+5. **Smart sequential Docker builds** — changed images build one at a time; unchanged images are skipped
 
 ### Adaptive scaling under load
 
 - Containers grow toward their **hard `mem_limit`** as caches warm up (observed: proxy APIs ~99% of limit under idle
   polling)
 - Limits prevent OOM on the host; Docker kills/restarts only the overflowing container
-- Use **`low`** or **`standard`** profile when sustained load causes restarts
+- Move through **`low`**, **`standard`**, and **`performance`** when sustained load needs more capacity
 - Scaling is transparent to users: nginx + Redis cache absorb polling; GC pauses are short with SerialGC on small heaps
 
 ---
@@ -122,7 +126,7 @@ Build-time caps in Dockerfiles:
 
 ## Spring Boot (prod profile)
 
-- `spring.main.lazy-initialization=true`
+- Default eager Spring initialization (no redundant override)
 - Swagger/OpenAPI disabled
 - Tomcat: 25 threads max, 80 connections
 - HikariCP: pool 4, min idle 1
@@ -147,7 +151,7 @@ Build-time caps in Dockerfiles:
 - `deploy.resources` for Swarm compatibility
 - `stop_grace_period: 30s` on Java services
 - tini as PID 1, jlink minimal JRE, netcat health checks
-- Staggered `depends_on` with health conditions
+- Minimal `depends_on` health gates; independent services start in parallel
 
 ---
 
@@ -199,7 +203,7 @@ NODE_BUILD_HEAP_MB=192
 
 | Area     | Paths                                                                       |
 |----------|-----------------------------------------------------------------------------|
-| Profiles | `compose/profiles/{ultra,low,standard}.env`                                 |
+| Profiles | `compose/profiles/{ultra,low,standard,performance}.env`                     |
 | Scripts  | `scripts/configure-resources.sh`, `scripts/build-sequential.sh`             |
 | Compose  | `compose/docker-compose.yml`, `compose/.env.example`                        |
 | APIs     | `*/application.properties`, `*/application-prod.properties`, `*/Dockerfile` |

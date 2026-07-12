@@ -156,8 +156,6 @@ services:
     depends_on:
       redis:
         condition: service_healthy
-      tsetmc-api:
-        condition: service_healthy
     stop_grace_period: 30s
     healthcheck:
       test: [ "CMD-SHELL", "nc -z -w1 localhost 9002 || exit 1" ]
@@ -249,13 +247,6 @@ services:
     container_name: bourse-azma-ui
     ports:
       - "8080:8080"
-    depends_on:
-      tsetmc-api:
-        condition: service_healthy
-      codal-api:
-        condition: service_healthy
-      bourse-azma-api:
-        condition: service_healthy
     restart: unless-stopped
     mem_limit: ${BOURSE_AZMA_UI_MEM_LIMIT:-24m}
     cpus: ${BOURSE_AZMA_UI_CPU_LIMIT:-0.08}
