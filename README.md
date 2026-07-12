@@ -45,6 +45,28 @@ cd bourse-azma-platform
 ./platform.sh status
 ./platform.sh logs --service tsetmc-api --follow
 ./platform.sh deploy          # update + restart (CLI shortcut)
+./platform.sh remote-deploy   # bootstrap once, then build/deploy on the server
+```
+
+### Remote deployment model
+
+`remote-deploy` has two automatic phases:
+
+- On a fresh server it runs a one-time bootstrap: OS updates, Docker, UFW,
+  fail2ban, swap, persistent secrets, Let's Encrypt and registry/build images.
+- On later runs it skips all host provisioning. It uploads only a compact
+  source archive (git metadata, Maven targets, `node_modules` and `dist` are
+  excluded), builds all images on the server using Docker layer cache, and
+  recreates the Compose stack.
+
+Build images are pulled from `docker.arvancloud.ir`, then
+`docker.abrha.net`, with the configured Docker daemon mirror as the fallback.
+No locally built Docker image is transferred over SCP.
+
+To deliberately repeat bootstrap after changing host provisioning:
+
+```bash
+REMOTE_FORCE_BOOTSTRAP=1 ./platform.sh remote-deploy
 ```
 
 ## Manual Compose Usage

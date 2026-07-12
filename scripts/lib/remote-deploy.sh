@@ -5,6 +5,8 @@ REMOTE_DOMAIN="${REMOTE_DOMAIN:-bourseazma.ir}"
 REMOTE_APP_DIR="${REMOTE_APP_DIR:-}"
 REMOTE_HEALTH_TIMEOUT="${REMOTE_HEALTH_TIMEOUT:-360}"
 REMOTE_ADMIN_USERNAME="${REMOTE_ADMIN_USERNAME:-erfan}"
+REMOTE_FORCE_BOOTSTRAP="${REMOTE_FORCE_BOOTSTRAP:-0}"
+REMOTE_BOOTSTRAP_VERSION="2"
 ARVAN_DOCKER_MIRROR="${ARVAN_DOCKER_MIRROR:-https://docker.arvancloud.ir}"
 ARVAN_UBUNTU_MIRROR="${ARVAN_UBUNTU_MIRROR:-https://mirror.arvancloud.ir/ubuntu}"
 
@@ -167,6 +169,24 @@ REMOTE_SCRIPT
   ok "Host packages, Docker, firewall, fail2ban, updates, SSH policy and swap are ready."
 }
 
+rd_bootstrap_needed() {
+  [[ "$REMOTE_FORCE_BOOTSTRAP" == "1" ]] && return 0
+  if rd_ssh "test \"\$(cat '$REMOTE_APP_DIR/.bootstrap-complete' 2>/dev/null)\" = '$REMOTE_BOOTSTRAP_VERSION'"; then
+    return 1
+  fi
+  # Migrate hosts prepared by an older version of this deploy script without
+  # paying the bootstrap cost again.
+  if rd_ssh "command -v docker >/dev/null && sudo test -s '/etc/letsencrypt/live/$REMOTE_DOMAIN/fullchain.pem' && sudo ufw status | grep -q '^Status: active'"; then
+    rd_mark_bootstrap_complete
+    return 1
+  fi
+  return 0
+}
+
+rd_mark_bootstrap_complete() {
+  rd_ssh "printf '%s' '$REMOTE_BOOTSTRAP_VERSION' > '$REMOTE_APP_DIR/.bootstrap-complete'"
+}
+
 rd_pull_base_images() {
   info "Pulling base images through the configured registry mirror..."
   rd_ssh "bash -s" <<'REMOTE_SCRIPT' || {
@@ -187,6 +207,72 @@ REMOTE_SCRIPT
     err "Could not pull PostgreSQL/Redis images. Check the Iranian registry mirror."
     return 1
   }
+}
+
+# Pull every build/runtime base once from an Iranian registry and tag it with
+# the canonical name used by the Dockerfiles. Subsequent builds are local to
+# the server and reuse Docker's layer cache.
+rd_pull_build_images() {
+  info "Preparing build images on the server (registry mirrors + local tags)..."
+  rd_ssh "bash -s" <<'REMOTE_SCRIPT'
+set -euo pipefail
+pull_and_tag() {
+  canonical="$1"
+  path="$2"
+  if sudo docker image inspect "$canonical" >/dev/null 2>&1; then
+    return 0
+  fi
+  for registry in docker.arvancloud.ir docker.abrha.net; do
+    if sudo docker pull "$registry/$path"; then
+      sudo docker tag "$registry/$path" "$canonical"
+      return 0
+    fi
+  done
+  # Last resort uses the daemon's configured registry-mirror chain.
+  sudo docker pull "$canonical"
+}
+pull_and_tag alpine:3.21 library/alpine:3.21
+pull_and_tag maven:3.9.9-eclipse-temurin-21-alpine library/maven:3.9.9-eclipse-temurin-21-alpine
+pull_and_tag node:22-alpine library/node:22-alpine
+pull_and_tag nginxinc/nginx-unprivileged:1.27-alpine-slim nginxinc/nginx-unprivileged:1.27-alpine-slim
+REMOTE_SCRIPT
+}
+
+rd_sync_source() {
+  info "Uploading the compact source bundle (no Docker images, git data, targets or node_modules)..."
+  local archive
+  archive="$(mktemp -t bourse-azma-source-XXXXXX).tar.gz"
+  tar -C "$WORKSPACE_DIR" -czf "$archive" \
+    --exclude='.git' --exclude='.idea' --exclude='target' --exclude='node_modules' \
+    --exclude='dist' --exclude='*.tar.gz' \
+    market.csv tsetmc-api codal-api fipiran-api bourse-azma-api bourse-azma-ui || {
+      rm -f "$archive"
+      return 1
+    }
+  info "Source bundle size: $(du -h "$archive" | awk '{print $1}')"
+  rd_scp "$archive" "$REMOTE_USER@$REMOTE_HOST:$REMOTE_APP_DIR/source.tar.gz" || {
+    rm -f "$archive"
+    return 1
+  }
+  rm -f "$archive"
+  rd_ssh "rm -rf '$REMOTE_APP_DIR/source'; mkdir -p '$REMOTE_APP_DIR/source'; tar -xzf '$REMOTE_APP_DIR/source.tar.gz' -C '$REMOTE_APP_DIR/source'; rm -f '$REMOTE_APP_DIR/source.tar.gz'"
+}
+
+rd_build_images_remote() {
+  info "Building application images on the server with persistent Docker layer cache..."
+  rd_ssh "SRC='$REMOTE_APP_DIR/source' bash -s" <<'REMOTE_SCRIPT'
+set -euo pipefail
+for image in tsetmc-api codal-api fipiran-api bourse-azma-api bourse-azma-ui; do
+  if sudo docker image inspect "$image:latest" >/dev/null 2>&1; then
+    sudo docker tag "$image:latest" "$image:rollback"
+  fi
+done
+sudo docker build -t tsetmc-api:latest -f "$SRC/tsetmc-api/Dockerfile" "$SRC/tsetmc-api"
+sudo docker build -t codal-api:latest -f "$SRC/codal-api/Dockerfile" "$SRC/codal-api"
+sudo docker build -t fipiran-api:latest -f "$SRC/fipiran-api/Dockerfile" "$SRC/fipiran-api"
+sudo docker build -t bourse-azma-api:latest -f "$SRC/bourse-azma-api/Dockerfile" "$SRC"
+sudo docker build --build-arg NGINX_CONF=nginx.remote.conf -t bourse-azma-ui:latest -f "$SRC/bourse-azma-ui/Dockerfile" "$SRC/bourse-azma-ui"
+REMOTE_SCRIPT
 }
 
 rd_provision_secrets() {
@@ -258,6 +344,13 @@ rd_provision_tls() {
   fi
   rd_sync_tls_certs
   rd_install_cert_renewal_hooks
+}
+
+rd_check_existing_tls() {
+  rd_ssh "sudo test -s '/etc/letsencrypt/live/$REMOTE_DOMAIN/fullchain.pem'" || {
+    err "TLS certificate is missing. Run once with REMOTE_FORCE_BOOTSTRAP=1."
+    return 1
+  }
 }
 
 rd_remote_platform() {
@@ -374,12 +467,20 @@ platform_remote_deploy() {
   rd_ensure_sshpass || return 1
   rd_prompt_credentials || return 1
   rd_check_connectivity || return 1
-  rd_provision_os || return 1
-  rd_pull_base_images || return 1
-  rd_provision_secrets || return 1
-  rd_provision_tls || return 1
-  rd_build_images || return 1
-  rd_ship_images || return 1
+  if rd_bootstrap_needed; then
+    info "First deployment detected; running one-time server bootstrap."
+    rd_provision_os || return 1
+    rd_pull_base_images || return 1
+    rd_provision_secrets || return 1
+    rd_provision_tls || return 1
+    rd_mark_bootstrap_complete || return 1
+  else
+    ok "Server bootstrap already completed; OS upgrades and security provisioning skipped."
+    rd_check_existing_tls || return 1
+  fi
+  rd_pull_build_images || return 1
+  rd_sync_source || return 1
+  rd_build_images_remote || return 1
   rd_sync_deploy_files || return 1
   if ! rd_start_remote_stack; then
     rd_rollback
