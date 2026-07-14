@@ -151,6 +151,7 @@ services:
     container_name: codal-api
     env_file:
       - ./config/codal-api.env
+      - ./config/bourse-azma-ui.env
     environment:
       <<: *java-runtime
       SPRING_DATA_REDIS_HOST: redis
