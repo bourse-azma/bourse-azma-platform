@@ -271,16 +271,18 @@ mkdir -p "$config_dir"
 touch "$config_dir/tsetmc-api.env" "$config_dir/codal-api.env" "$config_dir/bourse-azma-api.env"
 chmod 0600 "$config_dir"/*.env
 
-# Production UI configuration is server-owned after the first deployment.
-# Seed it from the uploaded source once, then preserve remote edits forever.
-if [ -s "$config_dir/bourse-azma-ui.env" ]; then
+# UI configuration is part of each release because Vite embeds it at build
+# time. Publish the uploaded local .env atomically before building the image.
+# If a release has no local .env, retain the last production configuration so
+# an accidental omission does not erase a working server configuration.
+if [ -s "$APP_DIR/source/bourse-azma-ui/.env" ]; then
+  install -m 0600 "$APP_DIR/source/bourse-azma-ui/.env" "$config_dir/bourse-azma-ui.env.new"
+  mv "$config_dir/bourse-azma-ui.env.new" "$config_dir/bourse-azma-ui.env"
+elif [ -s "$config_dir/bourse-azma-ui.env" ]; then
   cp "$config_dir/bourse-azma-ui.env" "$APP_DIR/source/bourse-azma-ui/.env"
-elif [ -f "$APP_DIR/source/bourse-azma-ui/.env" ]; then
-  cp "$APP_DIR/source/bourse-azma-ui/.env" "$config_dir/bourse-azma-ui.env"
-  chmod 0600 "$config_dir/bourse-azma-ui.env"
 else
-  touch "$config_dir/bourse-azma-ui.env" "$APP_DIR/source/bourse-azma-ui/.env"
-  chmod 0600 "$config_dir/bourse-azma-ui.env"
+  echo "UI configuration is missing locally and on the server." >&2
+  exit 1
 fi
 
 # The source Dockerfiles keep BuildKit cache mounts for fast local builds.

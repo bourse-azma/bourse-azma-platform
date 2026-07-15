@@ -76,7 +76,9 @@ Interactive menu option `7` opens remote operations:
   UI, Bourse Azma API, Codal API, or TSETMC API. Backend changes recreate only
   the selected container. UI changes rebuild only the UI image (Vite variables
   are compile-time settings) and then recreate its container. Each operation
-  waits for the affected service to become healthy.
+  waits for the affected service to become healthy. Each full release syncs the
+  local `bourse-azma-ui/.env` to production before building the UI, so UI edits
+  made directly on the server remain active only until the next full release.
 
 ## Manual Compose Usage
 
