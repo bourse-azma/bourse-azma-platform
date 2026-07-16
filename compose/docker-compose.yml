@@ -203,6 +203,7 @@ services:
       APP_TSETMC_BASE_URL: http://tsetmc-api:9000/tsetmc
       APP_ORDER_MATCHING_ENABLED: "true"
       APP_ORDER_MATCHING_POLL_INTERVAL_MS: 5000
+      APP_SECURITY_TRUSTED_PROXIES: ${APP_SECURITY_TRUSTED_PROXIES:-172.16.0.0/12}
       JAVA_TOOL_OPTIONS: ${BOURSE_AZMA_API_JAVA_OPTS:--XX:+UseSerialGC -XX:+UseContainerSupport -Xms48m -Xmx112m -Xss256k -XX:MaxMetaspaceSize=128m -XX:MaxDirectMemorySize=16m -XX:TieredStopAtLevel=1 -XX:+ExitOnOutOfMemoryError -Djava.security.egd=file:/dev/./urandom -Dfile.encoding=UTF-8}
       SPRING_DATASOURCE_HIKARI_MAXIMUM_POOL_SIZE: ${BOURSE_AZMA_API_HIKARI_MAX_POOL:-4}
       SPRING_DATASOURCE_HIKARI_MINIMUM_IDLE: ${BOURSE_AZMA_API_HIKARI_MIN_IDLE:-1}
