@@ -92,7 +92,7 @@ Examples:
   $(basename "$0") update
   $(basename "$0") deploy
   $(basename "$0") remote-deploy
-  REMOTE_HOST=1.2.3.4 REMOTE_USER=ubuntu REMOTE_PASSWORD=secret $(basename "$0") remote-deploy
+  REMOTE_HOST=1.2.3.4 REMOTE_USER=ubuntu REMOTE_PORT=22 REMOTE_PASSWORD=secret $(basename "$0") remote-deploy
 
 Workspace: $WORKSPACE_DIR
 Compose:   $COMPOSE_FILE

@@ -3,6 +3,7 @@
 
 REMOTE_DOMAIN="${REMOTE_DOMAIN:-bourseazma.ir}"
 REMOTE_APP_DIR="${REMOTE_APP_DIR:-}"
+REMOTE_PORT="${REMOTE_PORT:-}"
 REMOTE_HEALTH_TIMEOUT="${REMOTE_HEALTH_TIMEOUT:-360}"
 REMOTE_ADMIN_USERNAME="${REMOTE_ADMIN_USERNAME:-erfan}"
 REMOTE_FORCE_BOOTSTRAP="${REMOTE_FORCE_BOOTSTRAP:-0}"
@@ -24,7 +25,9 @@ remote_ssh_opts=(
   -o PubkeyAuthentication=no
   -o ControlMaster=auto
   -o ControlPersist=600
-  -o ControlPath=/tmp/bourse-azma-ssh-%C
+  # Per-user socket path avoids "Permission denied" when a root-owned
+  # ControlPath was left behind in /tmp from an earlier session.
+  -o ControlPath="${XDG_RUNTIME_DIR:-/tmp}/bourse-azma-ssh-%u-%C"
   -o ConnectTimeout=30
   -o ServerAliveInterval=15
   -o ServerAliveCountMax=6
@@ -45,20 +48,24 @@ rd_ensure_sshpass() {
 }
 
 rd_ssh() {
-  SSHPASS="$REMOTE_PASSWORD" sshpass -e ssh "${remote_ssh_opts[@]}" "$REMOTE_USER@$REMOTE_HOST" "$@"
+  SSHPASS="$REMOTE_PASSWORD" sshpass -e ssh -p "$REMOTE_PORT" "${remote_ssh_opts[@]}" "$REMOTE_USER@$REMOTE_HOST" "$@"
 }
 
 rd_ssh_tty() {
-  SSHPASS="$REMOTE_PASSWORD" sshpass -e ssh -tt "${remote_ssh_opts[@]}" "$REMOTE_USER@$REMOTE_HOST" "$@"
+  SSHPASS="$REMOTE_PASSWORD" sshpass -e ssh -tt -p "$REMOTE_PORT" "${remote_ssh_opts[@]}" "$REMOTE_USER@$REMOTE_HOST" "$@"
 }
 
 rd_scp() {
-  SSHPASS="$REMOTE_PASSWORD" sshpass -e scp "${remote_ssh_opts[@]}" "$@"
+  SSHPASS="$REMOTE_PASSWORD" sshpass -e scp -P "$REMOTE_PORT" "${remote_ssh_opts[@]}" "$@"
 }
 
 rd_prompt_credentials() {
   [[ -n "${REMOTE_HOST:-}" ]] || read -r -p "Server IP or hostname: " REMOTE_HOST
   [[ -n "${REMOTE_USER:-}" ]] || read -r -p "SSH user: " REMOTE_USER
+  if [[ -z "${REMOTE_PORT:-}" ]]; then
+    read -r -p "SSH port [22]: " REMOTE_PORT
+    REMOTE_PORT="${REMOTE_PORT:-22}"
+  fi
   if [[ -z "${REMOTE_PASSWORD:-}" ]]; then
     read -r -s -p "SSH password: " REMOTE_PASSWORD
     echo
@@ -66,25 +73,41 @@ rd_prompt_credentials() {
 
   [[ "$REMOTE_HOST" =~ ^[A-Za-z0-9._:-]+$ ]] || { err "Invalid remote host."; return 1; }
   [[ "$REMOTE_USER" =~ ^[a-z_][a-z0-9_-]*$ ]] || { err "Invalid remote user."; return 1; }
-  REMOTE_APP_DIR="${REMOTE_APP_DIR:-/home/$REMOTE_USER/bourse-azma-deploy}"
+  [[ "$REMOTE_PORT" =~ ^[0-9]+$ && "$REMOTE_PORT" -ge 1 && "$REMOTE_PORT" -le 65535 ]] || {
+    err "Invalid SSH port (must be 1-65535)."
+    return 1
+  }
+  # Root's home is /root, not /home/root.
+  if [[ -z "${REMOTE_APP_DIR:-}" ]]; then
+    if [[ "$REMOTE_USER" == "root" ]]; then
+      REMOTE_APP_DIR="/root/bourse-azma-deploy"
+    else
+      REMOTE_APP_DIR="/home/$REMOTE_USER/bourse-azma-deploy"
+    fi
+  fi
   [[ "$REMOTE_APP_DIR" =~ ^/[A-Za-z0-9._/-]+$ ]] || { err "REMOTE_APP_DIR must be an absolute safe path."; return 1; }
   [[ "$REMOTE_DOMAIN" =~ ^[A-Za-z0-9.-]+$ ]] || { err "Invalid remote domain."; return 1; }
 }
 
 rd_check_connectivity() {
-  info "Checking SSH connectivity to $REMOTE_USER@$REMOTE_HOST..."
+  info "Checking SSH connectivity to $REMOTE_USER@$REMOTE_HOST:$REMOTE_PORT..."
   rd_ssh "true" >/dev/null 2>&1 || {
-    err "Could not connect to $REMOTE_USER@$REMOTE_HOST."
+    err "Could not connect to $REMOTE_USER@$REMOTE_HOST:$REMOTE_PORT."
     return 1
   }
-  ok "Connected to $REMOTE_HOST."
+  ok "Connected to $REMOTE_HOST:$REMOTE_PORT."
 }
 
 rd_provision_os() {
   info "Updating and hardening the Ubuntu host..."
-  if ! rd_ssh "bash -s" <<'REMOTE_SCRIPT'
+  # Install Docker before dist-upgrade: long upgrades can drop the SSH session
+  # after needrestart, and the old script then reported success without Docker.
+  # Pass the real SSH port and deploy user so UFW/sshd hardening cannot lock us out.
+  if ! rd_ssh "REMOTE_SSH_PORT='$REMOTE_PORT' REMOTE_DEPLOY_USER='$REMOTE_USER' APP_DIR='$REMOTE_APP_DIR' bash -s" <<'REMOTE_SCRIPT'
 set -euo pipefail
 export DEBIAN_FRONTEND=noninteractive
+export NEEDRESTART_MODE=a
+export NEEDRESTART_SUSPEND=1
 
 codename="$(. /etc/os-release && printf '%s' "${VERSION_CODENAME:-}")"
 command -v curl >/dev/null 2>&1 || { sudo apt-get update -o Acquire::ForceIPv4=true; sudo apt-get install -y curl ca-certificates; }
@@ -101,12 +124,20 @@ Acquire::IndexTargets::deb::DEP-11-icons-small::DefaultEnabled "false";
 Acquire::IndexTargets::deb::DEP-11-icons::DefaultEnabled "false";
 EOF
 
+# Avoid interactive needrestart prompts on non-TTY SSH deploys.
+sudo tee /etc/needrestart/conf.d/99-bourse-azma.conf >/dev/null <<'EOF' 2>/dev/null || true
+$nrconf{restart} = 'a';
+$nrconf{kernelhints} = 0;
+EOF
+
 source_file=/etc/apt/sources.list.d/ubuntu.sources
 if [ -f "$source_file" ]; then
-  sudo cp --update=none "$source_file" "$source_file.bourse-azma-backup" 2>/dev/null || true
+  sudo cp --update=none "$source_file" "$source_file.bourse-azma-backup" 2>/dev/null || \
+    sudo cp -n "$source_file" "$source_file.bourse-azma-backup" 2>/dev/null || true
 else
   source_file=/etc/apt/sources.list
-  sudo cp --update=none "$source_file" "$source_file.bourse-azma-backup" 2>/dev/null || true
+  sudo cp --update=none "$source_file" "$source_file.bourse-azma-backup" 2>/dev/null || \
+    sudo cp -n "$source_file" "$source_file.bourse-azma-backup" 2>/dev/null || true
 fi
 
 mirror_ready=false
@@ -133,17 +164,56 @@ else
 fi
 "$mirror_ready" || { echo 'No configured Iranian Ubuntu mirror completed apt update.' >&2; exit 1; }
 
-sudo apt-get dist-upgrade -y
+# 1) Install Docker and host tooling FIRST (before dist-upgrade).
+echo "[bootstrap] Installing Docker and host packages..."
 sudo apt-get install -y ca-certificates curl openssl ufw fail2ban unattended-upgrades docker.io docker-compose-v2
 
+# 2) Configure and start Docker; fail hard if the binary is missing.
 sudo install -d -m 0755 /etc/docker
 printf '%s\n' '{' '  "registry-mirrors": ["https://docker.arvancloud.ir"],' '  "live-restore": true,' '  "log-driver": "json-file",' '  "log-opts": {"max-size": "10m", "max-file": "3"}' '}' | sudo tee /etc/docker/daemon.json >/dev/null
-sudo systemctl enable --now docker
-sudo usermod -aG docker "$(id -un)"
+sudo systemctl enable docker
+sudo systemctl restart docker
+# Wait until the daemon answers (socket can lag a few seconds after restart).
+for i in 1 2 3 4 5 6 7 8 9 10; do
+  if command -v docker >/dev/null 2>&1 && sudo docker info >/dev/null 2>&1; then
+    break
+  fi
+  sleep 1
+done
+if ! command -v docker >/dev/null 2>&1; then
+  echo "docker binary missing after apt install of docker.io" >&2
+  dpkg -l 'docker*' >&2 || true
+  exit 1
+fi
+if ! sudo docker info >/dev/null 2>&1; then
+  echo "docker daemon is not running after install" >&2
+  sudo systemctl status docker --no-pager >&2 || true
+  exit 1
+fi
+if [[ "$(id -un)" != "root" ]]; then
+  sudo usermod -aG docker "$(id -un)" || true
+fi
+echo "[bootstrap] Docker $(docker --version) is ready."
 
+# 3) OS upgrades after Docker is confirmed (session loss is recoverable).
+echo "[bootstrap] Running dist-upgrade..."
+sudo apt-get dist-upgrade -y
+# Re-check Docker after upgrade (package replacements must not leave us without it).
+if ! command -v docker >/dev/null 2>&1 || ! sudo docker info >/dev/null 2>&1; then
+  sudo apt-get install -y docker.io docker-compose-v2
+  sudo systemctl enable --now docker
+  sudo docker info >/dev/null 2>&1 || { echo "Docker unavailable after dist-upgrade" >&2; exit 1; }
+fi
+
+# 4) Firewall: open the actual SSH port used for this deploy (not always 22).
+ssh_port="${REMOTE_SSH_PORT:-22}"
 sudo ufw default deny incoming
 sudo ufw default allow outgoing
-sudo ufw limit 22/tcp comment 'SSH rate limited'
+# Always keep 22 as well when a custom port is used, in case console recovery needs it.
+if [[ "$ssh_port" != "22" ]]; then
+  sudo ufw limit 22/tcp comment 'SSH fallback' || true
+fi
+sudo ufw limit "${ssh_port}/tcp" comment 'SSH rate limited'
 sudo ufw allow 80/tcp comment 'HTTP redirect and ACME'
 sudo ufw allow 443/tcp comment 'Bourse Azma UI'
 sudo ufw --force enable
@@ -152,25 +222,58 @@ sudo install -d -m 0755 /etc/fail2ban/jail.d
 printf '%s\n' '[sshd]' 'enabled = true' 'bantime = 1h' 'findtime = 10m' 'maxretry = 5' | sudo tee /etc/fail2ban/jail.d/bourse-azma.conf >/dev/null
 sudo systemctl enable --now fail2ban
 
+# 5) SSH hardening without locking out a root password deploy.
 sudo install -d -m 0755 /etc/ssh/sshd_config.d
-printf '%s\n' 'PermitRootLogin no' 'MaxAuthTries 4' 'LoginGraceTime 30' 'X11Forwarding no' | sudo tee /etc/ssh/sshd_config.d/60-bourse-azma-hardening.conf >/dev/null
+if [[ "${REMOTE_DEPLOY_USER:-}" == "root" ]]; then
+  # Deploy is root+password: keep root login enabled or recovery becomes impossible.
+  printf '%s\n' 'PermitRootLogin yes' 'MaxAuthTries 4' 'LoginGraceTime 30' 'X11Forwarding no' | sudo tee /etc/ssh/sshd_config.d/60-bourse-azma-hardening.conf >/dev/null
+else
+  printf '%s\n' 'PermitRootLogin no' 'MaxAuthTries 4' 'LoginGraceTime 30' 'X11Forwarding no' | sudo tee /etc/ssh/sshd_config.d/60-bourse-azma-hardening.conf >/dev/null
+fi
 sudo sshd -t
-sudo systemctl reload ssh
+sudo systemctl reload ssh || true
 
 sudo dpkg-reconfigure -f noninteractive unattended-upgrades >/dev/null 2>&1 || true
 if ! swapon --show | grep -q .; then
-  sudo fallocate -l 1G /swapfile
+  sudo fallocate -l 1G /swapfile || sudo dd if=/dev/zero of=/swapfile bs=1M count=1024 status=none
   sudo chmod 600 /swapfile
   sudo mkswap /swapfile >/dev/null
   sudo swapon /swapfile
   grep -q '^/swapfile ' /etc/fstab || printf '%s\n' '/swapfile none swap sw 0 0' | sudo tee -a /etc/fstab >/dev/null
 fi
+
+# Ensure deploy directory exists (bootstrap marker + app files).
+sudo install -d -m 0755 "$APP_DIR"
+
+# Final gate: never report success without a working Docker CLI + daemon.
+command -v docker >/dev/null 2>&1
+sudo docker info >/dev/null 2>&1
+echo "[bootstrap] Host bootstrap finished successfully."
 REMOTE_SCRIPT
   then
     err "Ubuntu provisioning failed; no application containers were started."
     return 1
   fi
+
+  # Local-side verification (catches silent remote partial runs).
+  if ! rd_ssh "command -v docker >/dev/null && sudo docker info >/dev/null"; then
+    err "Provisioning finished but Docker is not usable on the remote host."
+    return 1
+  fi
   ok "Host packages, Docker, firewall, fail2ban, updates, SSH policy and swap are ready."
+}
+
+# Recover when bootstrap was marked complete (or partially ran) without Docker.
+rd_ensure_docker() {
+  if rd_ssh "command -v docker >/dev/null 2>&1 && sudo docker info >/dev/null 2>&1"; then
+    return 0
+  fi
+  warn "Docker is missing or not running on the remote host; installing/repairing..."
+  rd_ssh "export DEBIAN_FRONTEND=noninteractive NEEDRESTART_MODE=a; sudo apt-get update -y && sudo apt-get install -y docker.io docker-compose-v2 && sudo install -d -m 0755 /etc/docker && printf '%s\n' '{' '  \"registry-mirrors\": [\"https://docker.arvancloud.ir\"],' '  \"live-restore\": true,' '  \"log-driver\": \"json-file\",' '  \"log-opts\": {\"max-size\": \"10m\", \"max-file\": \"3\"}' '}' | sudo tee /etc/docker/daemon.json >/dev/null && sudo systemctl enable --now docker && sudo docker info >/dev/null" || {
+    err "Could not install or start Docker on the remote host."
+    return 1
+  }
+  ok "Docker is available on the remote host."
 }
 
 rd_bootstrap_needed() {
@@ -179,8 +282,13 @@ rd_bootstrap_needed() {
     return 1
   fi
   # Migrate hosts prepared by an older version of this deploy script without
-  # paying the bootstrap cost again.
+  # paying the bootstrap cost again. Runtime certs under /opt are enough.
+  if rd_ssh "command -v docker >/dev/null && sudo test -s '/opt/bourse-azma-certs/fullchain.pem' && sudo ufw status | grep -q '^Status: active'"; then
+    rd_mark_bootstrap_complete
+    return 1
+  fi
   if rd_ssh "command -v docker >/dev/null && sudo test -s '/etc/letsencrypt/live/$REMOTE_DOMAIN/fullchain.pem' && sudo ufw status | grep -q '^Status: active'"; then
+    rd_install_runtime_certs || true
     rd_mark_bootstrap_complete
     return 1
   fi
@@ -193,22 +301,38 @@ rd_mark_bootstrap_complete() {
 
 rd_pull_base_images() {
   info "Pulling base images through the configured registry mirror..."
+  rd_ensure_docker || return 1
   rd_ssh "bash -s" <<'REMOTE_SCRIPT' || {
 set -euo pipefail
+if ! command -v docker >/dev/null 2>&1; then
+  echo "docker command not found on PATH" >&2
+  exit 1
+fi
+sudo docker info >/dev/null
 pull_and_tag() {
   image="$1"
+  if sudo docker image inspect "$image" >/dev/null 2>&1; then
+    echo "already present: $image"
+    return 0
+  fi
   for registry in docker.arvancloud.ir docker.abrha.net; do
+    echo "pulling $registry/library/$image ..."
     if sudo docker pull "$registry/library/$image"; then
       sudo docker tag "$registry/library/$image" "$image"
       return 0
     fi
   done
+  # Fallback: daemon registry-mirrors (configured during bootstrap).
+  echo "pulling $image via daemon registry-mirrors ..."
+  if sudo docker pull "$image"; then
+    return 0
+  fi
   return 1
 }
 pull_and_tag postgres:14-alpine
 pull_and_tag redis:7-alpine
 REMOTE_SCRIPT
-    err "Could not pull PostgreSQL/Redis images. Check the Iranian registry mirror."
+    err "Could not pull PostgreSQL/Redis images. Check the Iranian registry mirror and that Docker is installed."
     return 1
   }
 }
@@ -218,21 +342,27 @@ REMOTE_SCRIPT
 # the server and reuse Docker's layer cache.
 rd_pull_build_images() {
   info "Preparing build images on the server (registry mirrors + local tags)..."
+  rd_ensure_docker || return 1
   rd_ssh "bash -s" <<'REMOTE_SCRIPT'
 set -euo pipefail
+command -v docker >/dev/null 2>&1 || { echo "docker command not found" >&2; exit 1; }
+sudo docker info >/dev/null
 pull_and_tag() {
   canonical="$1"
   path="$2"
   if sudo docker image inspect "$canonical" >/dev/null 2>&1; then
+    echo "already present: $canonical"
     return 0
   fi
   for registry in docker.arvancloud.ir docker.abrha.net; do
+    echo "pulling $registry/$path ..."
     if sudo docker pull "$registry/$path"; then
       sudo docker tag "$registry/$path" "$canonical"
       return 0
     fi
   done
   # Last resort uses the daemon's configured registry-mirror chain.
+  echo "pulling $canonical via daemon registry-mirrors ..."
   sudo docker pull "$canonical"
 }
 pull_and_tag alpine:3.21 library/alpine:3.21
@@ -285,8 +415,32 @@ else
   exit 1
 fi
 
+# Iranian Maven mirror (Central is often unreachable from IR hosts).
+# myket.ir serves the standard Maven Central layout.
+cat > "$APP_DIR/source/maven-settings.xml" <<'EOF'
+<settings xmlns="http://maven.apache.org/SETTINGS/1.2.0"
+          xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+          xsi:schemaLocation="http://maven.apache.org/SETTINGS/1.2.0 https://maven.apache.org/xsd/settings-1.2.0.xsd">
+  <mirrors>
+    <mirror>
+      <id>myket-central</id>
+      <name>Myket Maven Central mirror</name>
+      <url>https://maven.myket.ir</url>
+      <mirrorOf>*</mirrorOf>
+    </mirror>
+  </mirrors>
+</settings>
+EOF
+for service in tsetmc-api codal-api fipiran-api; do
+  cp "$APP_DIR/source/maven-settings.xml" "$APP_DIR/source/$service/settings.xml"
+done
+# bourse-azma-api builds with context = workspace root (COPY bourse-azma-api/...)
+cp "$APP_DIR/source/maven-settings.xml" "$APP_DIR/source/settings.xml"
+cp "$APP_DIR/source/maven-settings.xml" "$APP_DIR/source/bourse-azma-api/settings.xml"
+
 # The source Dockerfiles keep BuildKit cache mounts for fast local builds.
-# Produce server-only variants that work with the classic Linux builder.
+# Produce server-only variants that work with the classic Linux builder and
+# force Maven to use the Iranian mirror settings file.
 for service in tsetmc-api codal-api fipiran-api bourse-azma-api bourse-azma-ui; do
   awk '
     $1 == "RUN" && $2 ~ /^--mount=type=cache,target=\/root\/\.(m2|npm)$/ {
@@ -297,26 +451,79 @@ for service in tsetmc-api codal-api fipiran-api bourse-azma-api bourse-azma-ui; 
       next
     }
     { print }
-  ' "$APP_DIR/source/$service/Dockerfile" > "$APP_DIR/source/$service/Dockerfile.server"
+  ' "$APP_DIR/source/$service/Dockerfile" > "$APP_DIR/source/$service/Dockerfile.server.tmp"
+
+  if [[ "$service" == "bourse-azma-ui" ]]; then
+    mv "$APP_DIR/source/$service/Dockerfile.server.tmp" "$APP_DIR/source/$service/Dockerfile.server"
+    continue
+  fi
+
+  # Inject settings.xml into the build stage and point every mvn invocation at it.
+  awk '
+    BEGIN { injected=0 }
+    $1 == "WORKDIR" && injected == 0 {
+      print
+      print "COPY settings.xml /root/.m2/settings.xml"
+      injected=1
+      next
+    }
+    {
+      line = $0
+      if (line ~ /^RUN / && line ~ /mvn /) {
+        gsub(/mvn /, "mvn -s /root/.m2/settings.xml ", line)
+      }
+      print line
+    }
+  ' "$APP_DIR/source/$service/Dockerfile.server.tmp" > "$APP_DIR/source/$service/Dockerfile.server"
+  rm -f "$APP_DIR/source/$service/Dockerfile.server.tmp"
 done
 REMOTE_SCRIPT
 }
 
 rd_build_images_remote() {
-  info "Building application images on the server with persistent Docker layer cache..."
+  info "Building Java application images on the server (Maven via myket.ir mirror)..."
   rd_ssh "SRC='$REMOTE_APP_DIR/source' bash -s" <<'REMOTE_SCRIPT'
 set -euo pipefail
-for image in tsetmc-api codal-api fipiran-api bourse-azma-api bourse-azma-ui; do
+for image in tsetmc-api codal-api bourse-azma-api; do
   if sudo docker image inspect "$image:latest" >/dev/null 2>&1; then
     sudo docker tag "$image:latest" "$image:rollback"
   fi
 done
+# bourse-azma-api builds with context=workspace root; settings.xml lives there.
+test -s "$SRC/settings.xml"
+test -s "$SRC/tsetmc-api/settings.xml"
+test -s "$SRC/codal-api/settings.xml"
 sudo docker build -t tsetmc-api:latest -f "$SRC/tsetmc-api/Dockerfile.server" "$SRC/tsetmc-api"
 sudo docker build -t codal-api:latest -f "$SRC/codal-api/Dockerfile.server" "$SRC/codal-api"
-sudo docker build -t fipiran-api:latest -f "$SRC/fipiran-api/Dockerfile.server" "$SRC/fipiran-api"
 sudo docker build -t bourse-azma-api:latest -f "$SRC/bourse-azma-api/Dockerfile.server" "$SRC"
-sudo docker build --build-arg NGINX_CONF=nginx.remote.conf -t bourse-azma-ui:latest -f "$SRC/bourse-azma-ui/Dockerfile.server" "$SRC/bourse-azma-ui"
 REMOTE_SCRIPT
+}
+
+# npm registry is often blocked on Iranian servers. Build the UI image locally
+# (where npm works) for linux/amd64 and load it on the remote host.
+rd_build_and_ship_ui() {
+  info "Building bourse-azma-ui locally (npm is typically unreachable from IR servers)..."
+  local platform archive
+  platform="$(rd_remote_platform)"
+  cleanup_workspace_appledouble
+  docker build --platform "$platform" \
+    --build-arg NGINX_CONF=nginx.remote.conf \
+    -t bourse-azma-ui:latest \
+    -f "$WORKSPACE_DIR/bourse-azma-ui/Dockerfile" \
+    "$WORKSPACE_DIR/bourse-azma-ui" || return 1
+
+  info "Uploading bourse-azma-ui image to the server..."
+  rd_ssh "mkdir -p '$REMOTE_APP_DIR/images'" || return 1
+  archive="$(mktemp -t bourse-azma-ui-XXXXXX).tar.gz"
+  docker save bourse-azma-ui:latest | gzip -1 > "$archive" || { rm -f "$archive"; return 1; }
+  info "UI image archive size: $(du -h "$archive" | awk '{print $1}')"
+  rd_scp "$archive" "$REMOTE_USER@$REMOTE_HOST:$REMOTE_APP_DIR/images/bourse-azma-ui.tar.gz" || {
+    rm -f "$archive"
+    return 1
+  }
+  rm -f "$archive"
+  rd_ssh "if sudo docker image inspect 'bourse-azma-ui:latest' >/dev/null 2>&1; then sudo docker tag 'bourse-azma-ui:latest' 'bourse-azma-ui:rollback'; fi; gunzip -c '$REMOTE_APP_DIR/images/bourse-azma-ui.tar.gz' | sudo docker load; rm -f '$REMOTE_APP_DIR/images/bourse-azma-ui.tar.gz'" || return 1
+  ok "bourse-azma-ui image loaded on the server."
 }
 
 rd_provision_secrets() {
@@ -364,37 +571,105 @@ sudo chmod 0755 /etc/letsencrypt/renewal-hooks/deploy/reload-bourse-ui.sh
 REMOTE_SCRIPT
 }
 
-rd_sync_tls_certs() {
+rd_install_runtime_certs() {
+  # Install PEM pair into the path the UI container mounts.
+  # Prefer Let's Encrypt live certs; otherwise keep/generate self-signed.
   rd_ssh "DOMAIN='$REMOTE_DOMAIN' bash -s" <<'REMOTE_SCRIPT'
 set -euo pipefail
 sudo install -d -m 0755 /opt/bourse-azma-certs
-sudo cp -L "/etc/letsencrypt/live/$DOMAIN/fullchain.pem" /opt/bourse-azma-certs/fullchain.pem
-sudo cp -L "/etc/letsencrypt/live/$DOMAIN/privkey.pem" /opt/bourse-azma-certs/privkey.pem
+if sudo test -s "/etc/letsencrypt/live/$DOMAIN/fullchain.pem" && sudo test -s "/etc/letsencrypt/live/$DOMAIN/privkey.pem"; then
+  sudo cp -L "/etc/letsencrypt/live/$DOMAIN/fullchain.pem" /opt/bourse-azma-certs/fullchain.pem
+  sudo cp -L "/etc/letsencrypt/live/$DOMAIN/privkey.pem" /opt/bourse-azma-certs/privkey.pem
+else
+  # Self-signed so nginx can start when ACME is unreachable (common from IR networks).
+  if ! sudo test -s /opt/bourse-azma-certs/fullchain.pem || ! sudo test -s /opt/bourse-azma-certs/privkey.pem; then
+    sudo openssl req -x509 -nodes -newkey rsa:2048 -days 825 \
+      -keyout /opt/bourse-azma-certs/privkey.pem \
+      -out /opt/bourse-azma-certs/fullchain.pem \
+      -subj "/CN=$DOMAIN" \
+      -addext "subjectAltName=DNS:$DOMAIN,DNS:www.$DOMAIN" 2>/dev/null \
+      || sudo openssl req -x509 -nodes -newkey rsa:2048 -days 825 \
+           -keyout /opt/bourse-azma-certs/privkey.pem \
+           -out /opt/bourse-azma-certs/fullchain.pem \
+           -subj "/CN=$DOMAIN"
+  fi
+fi
 sudo chmod 0644 /opt/bourse-azma-certs/fullchain.pem
-sudo chown root:101 /opt/bourse-azma-certs/privkey.pem
+sudo chown root:101 /opt/bourse-azma-certs/privkey.pem 2>/dev/null || sudo chown root:root /opt/bourse-azma-certs/privkey.pem
 sudo chmod 0640 /opt/bourse-azma-certs/privkey.pem
 REMOTE_SCRIPT
 }
 
+# Backwards-compatible name used by renewal hooks and older call sites.
+rd_sync_tls_certs() {
+  rd_install_runtime_certs
+}
+
 rd_provision_tls() {
-  info "Provisioning a Let's Encrypt certificate for $REMOTE_DOMAIN..."
-  rd_ssh "sudo apt-get install -y certbot" || return 1
-  if ! rd_ssh "sudo test -s /etc/letsencrypt/live/$REMOTE_DOMAIN/fullchain.pem"; then
-    rd_ssh "sudo docker stop bourse-azma-ui >/dev/null 2>&1 || true; sudo certbot certonly --standalone --preferred-challenges http --non-interactive --agree-tos -m admin@$REMOTE_DOMAIN -d $REMOTE_DOMAIN" || {
-      rd_ssh "sudo docker start bourse-azma-ui >/dev/null 2>&1 || true"
-      err "Let's Encrypt failed. Confirm that $REMOTE_DOMAIN resolves to $REMOTE_HOST and ports 80/443 reach this host."
-      return 1
-    }
+  info "Provisioning TLS for $REMOTE_DOMAIN (Let's Encrypt with self-signed fallback)..."
+  rd_ssh "sudo apt-get install -y certbot openssl" || return 1
+
+  local le_ok=0
+  if rd_ssh "sudo test -s /etc/letsencrypt/live/$REMOTE_DOMAIN/fullchain.pem"; then
+    le_ok=1
+    ok "Existing Let's Encrypt certificate found for $REMOTE_DOMAIN."
+  else
+    info "Requesting Let's Encrypt certificate (HTTP-01). This can be slow or blocked on some Iranian hosts..."
+    # Retries + longer HTTP timeout help flaky ACME connectivity.
+    if rd_ssh "DOMAIN='$REMOTE_DOMAIN' bash -s" <<'REMOTE_SCRIPT'
+set -euo pipefail
+export DEBIAN_FRONTEND=noninteractive
+sudo docker stop bourse-azma-ui >/dev/null 2>&1 || true
+# Free port 80 if something else holds it.
+sudo fuser -k 80/tcp >/dev/null 2>&1 || true
+ok=1
+for attempt in 1 2 3; do
+  echo "[tls] certbot attempt $attempt/3..."
+  if sudo certbot certonly --standalone --preferred-challenges http \
+      --non-interactive --agree-tos --register-unsafely-without-email \
+      -d "$DOMAIN" \
+      --http-01-port 80 \
+      --config-dir /etc/letsencrypt \
+      --work-dir /var/lib/letsencrypt \
+      --logs-dir /var/log/letsencrypt; then
+    ok=0
+    break
   fi
-  rd_sync_tls_certs
-  rd_install_cert_renewal_hooks
+  sleep $((attempt * 8))
+done
+exit "$ok"
+REMOTE_SCRIPT
+    then
+      le_ok=1
+      ok "Let's Encrypt certificate issued for $REMOTE_DOMAIN."
+    else
+      rd_ssh "sudo docker start bourse-azma-ui >/dev/null 2>&1 || true" || true
+      warn "Let's Encrypt failed (ACME timeout/block or DNS/port 80). Falling back to a self-signed certificate so deploy can continue."
+      warn "Browsers will show a warning until a real cert is issued. Re-run with REMOTE_FORCE_BOOTSTRAP=1 when ACME is reachable."
+    fi
+  fi
+
+  rd_install_runtime_certs || return 1
+  if (( le_ok == 1 )); then
+    rd_install_cert_renewal_hooks || true
+  fi
+  rd_ssh "sudo test -s /opt/bourse-azma-certs/fullchain.pem && sudo test -s /opt/bourse-azma-certs/privkey.pem" || {
+    err "Runtime TLS files are missing under /opt/bourse-azma-certs."
+    return 1
+  }
 }
 
 rd_check_existing_tls() {
-  rd_ssh "sudo test -s '/etc/letsencrypt/live/$REMOTE_DOMAIN/fullchain.pem'" || {
-    err "TLS certificate is missing. Run once with REMOTE_FORCE_BOOTSTRAP=1."
-    return 1
-  }
+  # Runtime certs are what the UI container mounts; LE live path is optional.
+  if rd_ssh "sudo test -s '/opt/bourse-azma-certs/fullchain.pem' && sudo test -s '/opt/bourse-azma-certs/privkey.pem'"; then
+    return 0
+  fi
+  if rd_ssh "sudo test -s '/etc/letsencrypt/live/$REMOTE_DOMAIN/fullchain.pem'"; then
+    rd_install_runtime_certs
+    return 0
+  fi
+  err "TLS certificate is missing. Run once with REMOTE_FORCE_BOOTSTRAP=1."
+  return 1
 }
 
 rd_remote_platform() {
@@ -586,6 +861,7 @@ platform_remote_deploy() {
   rd_ensure_sshpass || return 1
   rd_prompt_credentials || return 1
   rd_check_connectivity || return 1
+  rd_ssh "mkdir -p '$REMOTE_APP_DIR'" || return 1
   if rd_bootstrap_needed; then
     info "First deployment detected; running one-time server bootstrap."
     rd_provision_os || return 1
@@ -595,11 +871,25 @@ platform_remote_deploy() {
     rd_mark_bootstrap_complete || return 1
   else
     ok "Server bootstrap already completed; OS upgrades and security provisioning skipped."
+    # Still repair Docker if a previous partial bootstrap left it missing.
+    rd_ensure_docker || return 1
     rd_check_existing_tls || return 1
   fi
-  rd_pull_build_images || return 1
-  rd_sync_source || return 1
-  rd_build_images_remote || return 1
+  # Prefer local image builds + ship. Iranian VPS hosts often cannot reach
+  # Maven Central, npmjs, or Alpine CDN, so on-server docker build fails.
+  # REMOTE_BUILD_MODE=remote forces the older server-side path (myket Maven + local UI).
+  local build_mode="${REMOTE_BUILD_MODE:-local}"
+  if [[ "$build_mode" == "remote" ]]; then
+    rd_pull_build_images || return 1
+    rd_sync_source || return 1
+    rd_build_images_remote || return 1
+    rd_build_and_ship_ui || return 1
+  else
+    info "Build mode: local (images are built here and uploaded to the server)."
+    rd_sync_source || return 1
+    rd_build_images || return 1
+    rd_ship_images || return 1
+  fi
   rd_sync_deploy_files || return 1
   if ! rd_start_remote_stack; then
     rd_rollback
@@ -608,7 +898,7 @@ platform_remote_deploy() {
 
   echo
   ok "Remote deploy and verification complete."
-  info "UI: https://$REMOTE_DOMAIN (only host ports 22, 80 and 443 are allowed)."
+  info "UI: https://$REMOTE_DOMAIN (host ports: SSH $REMOTE_PORT, 80, 443)."
   info "Database, Redis and API containers have no host port bindings."
   rd_show_admin_credentials
 }
