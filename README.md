@@ -48,6 +48,13 @@ cd bourse-azma-platform
 ./platform.sh remote-deploy   # bootstrap once, then build/deploy on the server
 ```
 
+For an SSH port other than the default `22`, pass `REMOTE_PORT`:
+
+```bash
+REMOTE_HOST=server.example.com REMOTE_PORT=9011 REMOTE_USER=root \
+  REMOTE_PASSWORD='…' ./platform.sh remote-deploy
+```
+
 ### Remote deployment model
 
 `remote-deploy` has two automatic phases:
@@ -126,8 +133,8 @@ Create this file:
 
 - `bourse-azma-ui/.env`
 
-Copy from `bourse-azma-ui/.env.example` and adjust values for your environment. The compose stack mounts this file into
-`tsetmc-api` and `codal-api`.
+Copy from `bourse-azma-ui/.env.example` and adjust values for your environment. Vite reads this file only while
+building the UI; backend services own their cache, retry, and scheduler settings and do not read frontend variables.
 
 For local Vite development outside Docker, keep the proxy targets pointed at the running backend ports (`9000`, `9002`,
 `9003`).

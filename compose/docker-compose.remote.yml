@@ -151,7 +151,6 @@ services:
     container_name: codal-api
     env_file:
       - ./config/codal-api.env
-      - ./config/bourse-azma-ui.env
     environment:
       <<: *java-runtime
       SPRING_DATA_REDIS_HOST: redis
@@ -195,6 +194,8 @@ services:
       SPRING_CONFIG_IMPORT: optional:configtree:/run/secrets/
       SPRING_DATA_REDIS_HOST: redis
       SPRING_DATA_REDIS_PORT: 6379
+      APP_WEBSOCKET_REDIS_FANOUT_ENABLED: ${APP_WEBSOCKET_REDIS_FANOUT_ENABLED:-true}
+      APP_WEBSOCKET_REDIS_FANOUT_CHANNEL: ${APP_WEBSOCKET_REDIS_FANOUT_CHANNEL:-bourse-azma:websocket:events}
       APP_MARKET_SEARCH_CSV_PATH: /app/market.csv
       APP_TSETMC_BASE_URL: http://tsetmc-api:9000/tsetmc
       APP_ORDER_MATCHING_ENABLED: "true"

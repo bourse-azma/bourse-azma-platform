@@ -102,8 +102,6 @@ services:
     container_name: tsetmc-api
     ports:
       - "9000:9000"
-    env_file:
-      - ../../bourse-azma-ui/.env
     environment:
       <<: *java-runtime
       SPRING_DATA_REDIS_HOST: redis
@@ -145,8 +143,6 @@ services:
     container_name: codal-api
     ports:
       - "9002:9002"
-    env_file:
-      - ../../bourse-azma-ui/.env
     environment:
       <<: *java-runtime
       SPRING_DATA_REDIS_HOST: redis
@@ -189,8 +185,6 @@ services:
     container_name: bourse-azma-api
     ports:
       - "9003:9003"
-    env_file:
-      - ../../bourse-azma-ui/.env
     environment:
       <<: *java-runtime
       SERVER_PORT: 9003
@@ -203,6 +197,8 @@ services:
       APP_TSETMC_BASE_URL: http://tsetmc-api:9000/tsetmc
       APP_ORDER_MATCHING_ENABLED: "true"
       APP_ORDER_MATCHING_POLL_INTERVAL_MS: 5000
+      APP_WEBSOCKET_REDIS_FANOUT_ENABLED: ${APP_WEBSOCKET_REDIS_FANOUT_ENABLED:-true}
+      APP_WEBSOCKET_REDIS_FANOUT_CHANNEL: ${APP_WEBSOCKET_REDIS_FANOUT_CHANNEL:-bourse-azma:websocket:events}
       APP_SECURITY_TRUSTED_PROXIES: ${APP_SECURITY_TRUSTED_PROXIES:-172.16.0.0/12}
       JAVA_TOOL_OPTIONS: ${BOURSE_AZMA_API_JAVA_OPTS:--XX:+UseSerialGC -XX:+UseContainerSupport -Xms48m -Xmx112m -Xss256k -XX:MaxMetaspaceSize=128m -XX:MaxDirectMemorySize=16m -XX:TieredStopAtLevel=1 -XX:+ExitOnOutOfMemoryError -Djava.security.egd=file:/dev/./urandom -Dfile.encoding=UTF-8}
       SPRING_DATASOURCE_HIKARI_MAXIMUM_POOL_SIZE: ${BOURSE_AZMA_API_HIKARI_MAX_POOL:-4}
@@ -250,6 +246,13 @@ services:
     container_name: bourse-azma-ui
     ports:
       - "8080:8080"
+    depends_on:
+      tsetmc-api:
+        condition: service_healthy
+      codal-api:
+        condition: service_healthy
+      bourse-azma-api:
+        condition: service_healthy
     restart: unless-stopped
     mem_limit: ${BOURSE_AZMA_UI_MEM_LIMIT:-24m}
     cpus: ${BOURSE_AZMA_UI_CPU_LIMIT:-0.08}
