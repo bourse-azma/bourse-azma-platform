@@ -1,4 +1,5 @@
 .idea/
+backups/
 compose/.env
 compose/.build-state/
 .DS_Store

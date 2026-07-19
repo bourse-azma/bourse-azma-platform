@@ -15,6 +15,10 @@ REMOTE_FORCE_BOOTSTRAP="${REMOTE_FORCE_BOOTSTRAP:-0}"
 REMOTE_BOOTSTRAP_VERSION="2"
 ARVAN_DOCKER_MIRROR="${ARVAN_DOCKER_MIRROR:-https://docker.arvancloud.ir}"
 ARVAN_UBUNTU_MIRROR="${ARVAN_UBUNTU_MIRROR:-https://mirror.arvancloud.ir/ubuntu}"
+IRAN_MAVEN_MIRROR="${IRAN_MAVEN_MIRROR:-https://mirror.abrha.net/repository/maven/}"
+IRAN_NPM_REGISTRIES="${IRAN_NPM_REGISTRIES:-https://package-mirror.liara.ir/repository/npm/ https://mirror.abrha.net/repository/npm/}"
+IRAN_ALPINE_MIRROR="${IRAN_ALPINE_MIRROR:-https://mirror.arvancloud.ir/alpine}"
+REMOTE_BACKUP_DIR="${REMOTE_BACKUP_DIR:-$PLATFORM_ROOT/backups}"
 
 REMOTE_IMAGES=(
   "tsetmc-api|$WORKSPACE_DIR/tsetmc-api|Dockerfile"
@@ -128,7 +132,7 @@ rd_check_connectivity() {
 
 rd_provision_os() {
   info "Updating and hardening the Ubuntu host..."
-  if ! rd_ssh "bash -s" <<'REMOTE_SCRIPT'
+  if ! rd_ssh "SSH_PORT='$REMOTE_PORT' bash -s" <<'REMOTE_SCRIPT'
 set -euo pipefail
 export DEBIAN_FRONTEND=noninteractive
 
@@ -183,13 +187,13 @@ sudo apt-get dist-upgrade -y
 sudo apt-get install -y ca-certificates curl openssl ufw fail2ban unattended-upgrades docker.io docker-compose-v2
 
 sudo install -d -m 0755 /etc/docker
-printf '%s\n' '{' '  "registry-mirrors": ["https://docker.arvancloud.ir"],' '  "live-restore": true,' '  "log-driver": "json-file",' '  "log-opts": {"max-size": "10m", "max-file": "3"}' '}' | sudo tee /etc/docker/daemon.json >/dev/null
+printf '%s\n' '{' '  "registry-mirrors": ["https://docker-mirror.kargadan.ir", "https://docker.arvancloud.ir"],' '  "live-restore": true,' '  "log-driver": "json-file",' '  "log-opts": {"max-size": "10m", "max-file": "3"}' '}' | sudo tee /etc/docker/daemon.json >/dev/null
 sudo systemctl enable --now docker
 sudo usermod -aG docker "$(id -un)"
 
 sudo ufw default deny incoming
 sudo ufw default allow outgoing
-sudo ufw limit 22/tcp comment 'SSH rate limited'
+sudo ufw limit "$SSH_PORT/tcp" comment 'SSH rate limited'
 sudo ufw allow 80/tcp comment 'HTTP redirect and ACME'
 sudo ufw allow 443/tcp comment 'Bourse Azma UI'
 sudo ufw --force enable
@@ -199,7 +203,11 @@ printf '%s\n' '[sshd]' 'enabled = true' 'bantime = 1h' 'findtime = 10m' 'maxretr
 sudo systemctl enable --now fail2ban
 
 sudo install -d -m 0755 /etc/ssh/sshd_config.d
-printf '%s\n' 'PermitRootLogin no' 'MaxAuthTries 4' 'LoginGraceTime 30' 'X11Forwarding no' | sudo tee /etc/ssh/sshd_config.d/60-bourse-azma-hardening.conf >/dev/null
+# Do not change PermitRootLogin here: password-based deployments may use root,
+# and disabling it before provisioning a tested sudo user would lock out the
+# operator. Authentication policy should be tightened separately after keys
+# and a non-root sudo account are verified.
+printf '%s\n' 'MaxAuthTries 4' 'LoginGraceTime 30' 'X11Forwarding no' | sudo tee /etc/ssh/sshd_config.d/60-bourse-azma-hardening.conf >/dev/null
 sudo sshd -t
 sudo systemctl reload ssh
 
@@ -243,7 +251,7 @@ rd_pull_base_images() {
 set -euo pipefail
 pull_and_tag() {
   image="$1"
-  for registry in docker.arvancloud.ir docker.abrha.net; do
+  for registry in docker-mirror.kargadan.ir docker.arvancloud.ir docker.abrha.net; do
     if sudo docker pull "$registry/library/$image"; then
       sudo docker tag "$registry/library/$image" "$image"
       return 0
@@ -272,7 +280,7 @@ pull_and_tag() {
   if sudo docker image inspect "$canonical" >/dev/null 2>&1; then
     return 0
   fi
-  for registry in docker.arvancloud.ir docker.abrha.net; do
+  for registry in docker-mirror.kargadan.ir docker.arvancloud.ir docker.abrha.net; do
     if sudo docker pull "$registry/$path"; then
       sudo docker tag "$registry/$path" "$canonical"
       return 0
@@ -347,22 +355,63 @@ for service in tsetmc-api codal-api fipiran-api bourse-azma-api bourse-azma-ui; 
   ' "$APP_DIR/source/$service/Dockerfile" > "$APP_DIR/source/$service/Dockerfile.server"
 done
 REMOTE_SCRIPT
+
+  # Maven Central and npm are commonly unreachable from Iranian hosts. Keep
+  # local Dockerfiles portable and inject domestic mirrors only into the
+  # generated server build files.
+  rd_ssh "SRC='$REMOTE_APP_DIR/source' MAVEN_MIRROR='$IRAN_MAVEN_MIRROR' NPM_REGISTRIES='$IRAN_NPM_REGISTRIES' ALPINE_MIRROR='$IRAN_ALPINE_MIRROR' bash -s" <<'REMOTE_SCRIPT'
+set -euo pipefail
+cat > "$SRC/maven-settings.xml" <<EOF
+<settings xmlns="http://maven.apache.org/SETTINGS/1.2.0">
+  <mirrors>
+    <mirror>
+      <id>iran-central</id>
+      <name>Iran Maven Central mirror</name>
+      <url>$MAVEN_MIRROR</url>
+      <mirrorOf>central</mirrorOf>
+    </mirror>
+  </mirrors>
+</settings>
+EOF
+for service in tsetmc-api codal-api fipiran-api bourse-azma-api; do
+  file="$SRC/$service/Dockerfile.server"
+  cp "$SRC/maven-settings.xml" "$SRC/$service/maven-settings.xml"
+  sed -i '/^WORKDIR \/workspace$/a COPY maven-settings.xml /root/.m2/settings.xml' "$file"
+done
+ui_file="$SRC/bourse-azma-ui/Dockerfile.server"
+escaped_registries="$(printf '%s' "$NPM_REGISTRIES" | sed 's/[&|]/\\&/g')"
+sed -i "s|npm ci --no-audit --no-fund|for registry in $escaped_registries; do npm ci --registry=\"\$registry\" --no-audit --no-fund \&\& exit 0; done; exit 1|" "$ui_file"
+for file in "$SRC"/*/Dockerfile.server; do
+  sed -i "s|apk add |sed -i 's#https://dl-cdn.alpinelinux.org/alpine#$ALPINE_MIRROR#g' /etc/apk/repositories \&\& apk add |" "$file"
+  sed -i -E 's/(COPY --chown=[^ ]+) --chmod=[^ ]+ /\1 /' "$file"
+done
+REMOTE_SCRIPT
 }
 
 rd_build_images_remote() {
   info "Building application images on the server with persistent Docker layer cache..."
   rd_ssh "SRC='$REMOTE_APP_DIR/source' bash -s" <<'REMOTE_SCRIPT'
 set -euo pipefail
+build_image() {
+  attempt=1
+  while [ "$attempt" -le 3 ]; do
+    sudo docker build --network=host "$@" && return 0
+    [ "$attempt" -eq 3 ] && return 1
+    echo "Build attempt $attempt failed; retrying after transient mirror/network error..." >&2
+    sleep $((attempt * 5))
+    attempt=$((attempt + 1))
+  done
+}
 for image in tsetmc-api codal-api fipiran-api bourse-azma-api bourse-azma-ui; do
   if sudo docker image inspect "$image:latest" >/dev/null 2>&1; then
     sudo docker tag "$image:latest" "$image:rollback"
   fi
 done
-sudo docker build -t tsetmc-api:latest -f "$SRC/tsetmc-api/Dockerfile.server" "$SRC/tsetmc-api"
-sudo docker build -t codal-api:latest -f "$SRC/codal-api/Dockerfile.server" "$SRC/codal-api"
-sudo docker build -t fipiran-api:latest -f "$SRC/fipiran-api/Dockerfile.server" "$SRC/fipiran-api"
-sudo docker build -t bourse-azma-api:latest -f "$SRC/bourse-azma-api/Dockerfile.server" "$SRC"
-sudo docker build --build-arg NGINX_CONF=nginx.remote.conf -t bourse-azma-ui:latest -f "$SRC/bourse-azma-ui/Dockerfile.server" "$SRC/bourse-azma-ui"
+build_image -t tsetmc-api:latest -f "$SRC/tsetmc-api/Dockerfile.server" "$SRC/tsetmc-api"
+build_image -t codal-api:latest -f "$SRC/codal-api/Dockerfile.server" "$SRC/codal-api"
+build_image -t fipiran-api:latest -f "$SRC/fipiran-api/Dockerfile.server" "$SRC/fipiran-api"
+build_image -t bourse-azma-api:latest -f "$SRC/bourse-azma-api/Dockerfile.server" "$SRC"
+build_image --build-arg NGINX_CONF=nginx.remote.conf -t bourse-azma-ui:latest -f "$SRC/bourse-azma-ui/Dockerfile.server" "$SRC/bourse-azma-ui"
 REMOTE_SCRIPT
 }
 
@@ -441,8 +490,8 @@ rd_provision_tls() {
 }
 
 rd_check_existing_tls() {
-  rd_ssh "sudo test -s '/etc/letsencrypt/live/$REMOTE_DOMAIN/fullchain.pem'" || {
-    err "TLS certificate is missing. Run once with REMOTE_FORCE_BOOTSTRAP=1."
+  rd_ssh "sudo test -s '/etc/letsencrypt/live/$REMOTE_DOMAIN/fullchain.pem' || { sudo test -s /opt/bourse-azma-certs/fullchain.pem && sudo test -s /opt/bourse-azma-certs/privkey.pem; }" || {
+    err "TLS certificate is missing. Run once with REMOTE_FORCE_BOOTSTRAP=1 or install certificates in /opt/bourse-azma-certs."
     return 1
   }
 }
@@ -502,6 +551,97 @@ rd_sync_deploy_files() {
     rd_ssh "touch '$REMOTE_APP_DIR/bourse-azma-ui/.env.new'"
   fi
   rd_ssh "mv '$REMOTE_APP_DIR/bourse-azma-platform/compose/docker-compose.yml.new' '$REMOTE_APP_DIR/bourse-azma-platform/compose/docker-compose.yml'; mv '$REMOTE_APP_DIR/bourse-azma-platform/compose/.env.new' '$REMOTE_APP_DIR/bourse-azma-platform/compose/.env'; mv '$REMOTE_APP_DIR/bourse-azma-ui/.env.new' '$REMOTE_APP_DIR/bourse-azma-ui/.env'; chmod 0600 '$REMOTE_APP_DIR/bourse-azma-platform/compose/.env' '$REMOTE_APP_DIR/bourse-azma-ui/.env'"
+}
+
+rd_require_deployed_database() {
+  rd_prepare_app_dir || return 1
+  rd_ssh "docker inspect bourse-azma-db >/dev/null 2>&1 && docker exec bourse-azma-db pg_isready -q" || {
+    err "A healthy deployed PostgreSQL container was not found on $REMOTE_HOST."
+    return 1
+  }
+}
+
+rd_database_backup() {
+  local timestamp backup_file temp_file checksum remote_file remote_checksum
+  timestamp="$(date -u +%Y%m%dT%H%M%SZ)"
+  mkdir -p "$REMOTE_BACKUP_DIR" || return 1
+  backup_file="$REMOTE_BACKUP_DIR/bourse-${REMOTE_HOST//[:.]/_}-$timestamp.dump"
+  temp_file="$backup_file.part"
+  remote_file="/tmp/bourse-db-$timestamp.dump"
+
+  info "Creating a consistent PostgreSQL backup on $REMOTE_HOST..."
+  if ! rd_ssh "set -e; docker exec bourse-azma-db sh -c 'PGPASSWORD=\"\$(cat /run/secrets/postgres_password)\" pg_dump --format=custom --compress=6 --no-owner --no-acl --username=\"\$(cat /run/secrets/postgres_username)\" --dbname=bourse --file=/tmp/bourse.dump && pg_restore --list /tmp/bourse.dump >/dev/null'; docker cp bourse-azma-db:/tmp/bourse.dump '$remote_file'; docker exec bourse-azma-db rm -f /tmp/bourse.dump; chmod 0600 '$remote_file'"; then
+    rm -f "$temp_file"
+    err "Database backup failed."
+    return 1
+  fi
+  remote_checksum="$(rd_ssh "sha256sum '$remote_file' | awk '{print \$1}'")" || return 1
+  rd_scp "$REMOTE_USER@$REMOTE_HOST:$remote_file" "$temp_file" || { rd_ssh "rm -f '$remote_file'"; rm -f "$temp_file"; return 1; }
+  rd_ssh "rm -f '$remote_file'"
+  [[ -s "$temp_file" ]] || { rm -f "$temp_file"; err "The database backup is empty."; return 1; }
+  checksum="$(shasum -a 256 "$temp_file" | awk '{print $1}')"
+  [[ "$checksum" == "$remote_checksum" ]] || { rm -f "$temp_file"; err "Backup checksum changed during download."; return 1; }
+  mv "$temp_file" "$backup_file"
+  printf '%s  %s\n' "$checksum" "$(basename "$backup_file")" > "$backup_file.sha256"
+  chmod 0600 "$backup_file" "$backup_file.sha256"
+  ok "Verified backup saved to: $backup_file"
+}
+
+rd_database_restore() {
+  local backup_file answer compose_dir
+  mkdir -p "$REMOTE_BACKUP_DIR" || return 1
+  echo
+  info "Available local backups:"
+  find "$REMOTE_BACKUP_DIR" -maxdepth 1 -type f -name '*.dump' ! -name '._*' -print | sort || true
+  read -r -p "Backup file to restore: " backup_file || return 1
+  [[ -f "$backup_file" && "$backup_file" == *.dump ]] || { err "Backup file does not exist or is not a .dump archive."; return 1; }
+  if [[ -f "$backup_file.sha256" ]]; then
+    (cd "$(dirname "$backup_file")" && shasum -a 256 -c "$(basename "$backup_file.sha256")") || {
+      err "Backup checksum validation failed."
+      return 1
+    }
+  fi
+  rd_ssh "docker exec -i bourse-azma-db pg_restore --list" < "$backup_file" >/dev/null || {
+      err "PostgreSQL rejected this backup archive."
+      return 1
+    }
+  warn "Restore replaces the current 'bourse' database contents on $REMOTE_HOST."
+  read -r -p "Type RESTORE to continue: " answer || return 1
+  [[ "$answer" == "RESTORE" ]] || { warn "Restore cancelled."; return 0; }
+
+  compose_dir="$REMOTE_APP_DIR/bourse-azma-platform/compose"
+  info "Stopping the application writer and restoring the database atomically..."
+  rd_ssh "cd '$compose_dir' && docker compose stop bourse-azma-api" || return 1
+  if ! rd_ssh "docker exec -i bourse-azma-db sh -c 'PGPASSWORD=\"\$(cat /run/secrets/postgres_password)\" psql --username=\"\$(cat /run/secrets/postgres_username)\" --dbname=bourse -v ON_ERROR_STOP=1 -c \"SELECT pg_terminate_backend(pid) FROM pg_stat_activity WHERE datname = current_database() AND pid <> pg_backend_pid();\" >/dev/null; PGPASSWORD=\"\$(cat /run/secrets/postgres_password)\" pg_restore --exit-on-error --clean --if-exists --no-owner --no-acl --single-transaction --username=\"\$(cat /run/secrets/postgres_username)\" --dbname=bourse'" < "$backup_file"; then
+    err "Restore failed; the API remains stopped to prevent writes into a partial database."
+    return 1
+  fi
+  rd_ssh "cd '$compose_dir' && docker compose up -d bourse-azma-api" || return 1
+  rd_wait_for_service_health bourse-azma-api || return 1
+  ok "Database restored and bourse-azma-api is healthy."
+}
+
+platform_remote_database() {
+  local choice
+  rd_ensure_sshpass || return 1
+  rd_prompt_credentials || return 1
+  rd_check_connectivity || return 1
+  rd_require_deployed_database || return 1
+  cat <<MENU
+
+${C_BOLD}${C_CYAN}===== Remote Database =====${C_RESET}
+1) Create and download backup
+2) Restore a local backup to this server
+3) Back
+MENU
+  read -r -p "Choose an option [1-3]: " choice || return 1
+  choice="$(normalize_digits "$choice")"
+  case "$choice" in
+    1) rd_database_backup ;;
+    2) rd_database_restore ;;
+    3|"") return 0 ;;
+    *) err "Invalid selection. Choose 1-3."; return 1 ;;
+  esac
 }
 
 rd_rollback() {

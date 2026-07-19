@@ -67,7 +67,13 @@ REMOTE_HOST=server.example.com REMOTE_PORT=9011 REMOTE_USER=root \
   recreates the Compose stack.
 
 Build images are pulled from `docker.arvancloud.ir`, then
-`docker.abrha.net`, with the configured Docker daemon mirror as the fallback.
+`docker-mirror.kargadan.ir`, then `docker.abrha.net`, with the configured
+Docker daemon mirror as the fallback. Remote Maven builds use the public
+Abrha/ParsPack mirror. npm builds automatically try Liara and Abrha/ParsPack.
+The request-capped Runflare service is deliberately not used, and Myket is not
+used because live checksum verification found a corrupted response. Local
+Dockerfiles remain unchanged. Docker layer caching also means unchanged
+dependency manifests make later releases without contacting package mirrors.
 No locally built Docker image is transferred over SCP.
 
 To deliberately repeat bootstrap after changing host provisioning:
@@ -86,6 +92,11 @@ Interactive menu option `7` opens remote operations:
   waits for the affected service to become healthy. Each full release syncs the
   local `bourse-azma-ui/.env` to production before building the UI, so UI edits
   made directly on the server remain active only until the next full release.
+- **Database backup / restore** downloads a verified PostgreSQL custom-format
+  backup into `bourse-azma-platform/backups`. Choose restore on any deployed
+  server and point it at that file to migrate server 1 to server 2. Restore
+  validates the checksum/archive, stops the API writer, restores in one
+  transaction, and starts the API only after success.
 
 ## Manual Compose Usage
 

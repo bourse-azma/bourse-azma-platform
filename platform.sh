@@ -223,15 +223,17 @@ menu_remote_operations() {
 ${C_BOLD}${C_CYAN}===== Remote Operations =====${C_RESET}
 1) Deploy / Release
 2) Edit configuration
-3) Back
+3) Database backup / restore
+4) Back
 MENU
-  read -r -p "Choose an option [1-3]: " choice || return 1
+  read -r -p "Choose an option [1-4]: " choice || return 1
   choice="$(normalize_digits "$choice")"
   case "$choice" in
     1) platform_remote_deploy ;;
     2) platform_remote_config ;;
-    3|"") return 0 ;;
-    *) err "Invalid selection. Choose 1-3."; return 1 ;;
+    3) platform_remote_database ;;
+    4|"") return 0 ;;
+    *) err "Invalid selection. Choose 1-4."; return 1 ;;
   esac
 }
 
